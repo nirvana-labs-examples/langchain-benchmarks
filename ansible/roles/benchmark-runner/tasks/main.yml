@@ -1,0 +1,55 @@
+---
+- name: Install Python and pip
+  apt:
+    name:
+      - python3
+      - python3-pip
+      - python3-venv
+    state: present
+    update_cache: true
+
+- name: Create benchmark directory
+  file:
+    path: /opt/benchmark-runner
+    state: directory
+    mode: '0755'
+
+- name: Copy benchmark script
+  template:
+    src: benchmark.py.j2
+    dest: /opt/benchmark-runner/benchmark.py
+    mode: '0755'
+
+- name: Create virtual environment
+  command: python3 -m venv /opt/benchmark-runner/venv
+  args:
+    creates: /opt/benchmark-runner/venv
+
+- name: Install Python dependencies
+  pip:
+    name:
+      - psycopg2-binary
+      - redis
+      - qdrant-client
+      - sentence-transformers
+      - numpy
+    virtualenv: /opt/benchmark-runner/venv
+
+- name: Run benchmark
+  command: /opt/benchmark-runner/venv/bin/python /opt/benchmark-runner/benchmark.py
+  args:
+    chdir: /opt/benchmark-runner
+  register: benchmark_result
+  async: 1800  # 30 minute timeout
+  poll: 30     # Check every 30 seconds
+
+- name: Save results to file
+  copy:
+    content: "{{ benchmark_result.stdout }}"
+    dest: /opt/benchmark-runner/results.json
+
+- name: Fetch results to local
+  fetch:
+    src: /opt/benchmark-runner/results.json
+    dest: "results/{{ platform_name }}-benchmark.json"
+    flat: yes

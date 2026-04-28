@@ -1,0 +1,30 @@
+---
+- name: Compare benchmark results
+  hosts: localhost
+  gather_facts: false
+  tasks:
+    - name: Load AWS results
+      include_vars:
+        file: "results/aws-gp3-benchmark.json"
+        name: aws
+
+    - name: Load Nirvana results
+      include_vars:
+        file: "results/nirvana-abs-benchmark.json"
+        name: nirvana
+
+    - name: Display comparison
+      debug:
+        msg: |
+          ============================================================
+          BENCHMARK COMPARISON
+          ============================================================
+
+          Metric                   Nirvana ABS      AWS gp3         Diff
+          ------------------------------------------------------------
+          IOPS                     {{ nirvana.iops_total }}         {{ aws.iops_total }}          {{ ((nirvana.iops_total - aws.iops_total) / aws.iops_total * 100) | round(0) }}%
+          Latency p99 (ms)         {{ nirvana.latency_p99_ms }}     {{ aws.latency_p99_ms }}      {{ ((aws.latency_p99_ms - nirvana.latency_p99_ms) / aws.latency_p99_ms * 100) | round(0) }}%
+          Qdrant Write p99         {{ nirvana.qdrant_write_p99_ms }} {{ aws.qdrant_write_p99_ms }}
+          Postgres Write p99       {{ nirvana.postgres_write_p99_ms }} {{ aws.postgres_write_p99_ms }}
+
+          ============================================================

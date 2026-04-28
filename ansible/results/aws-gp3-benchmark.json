@@ -1,0 +1,18 @@
+{
+  "platform": "aws-gp3",
+  "timestamp": "2026-04-28T02:50:33.712698",
+  "num_agents": 100,
+  "tasks_per_agent": 10,
+  "num_iterations": 3,
+  "total_operations": 21000,
+  "total_time_sec": 332.82,
+  "iops_total": 63.1,
+  "latency_p50_ms": 413.92,
+  "latency_p99_ms": 565.21,
+  "qdrant_write_p99_ms": 603.99,
+  "qdrant_read_p99_ms": 549.05,
+  "postgres_write_p99_ms": 13.43,
+  "redis_write_p99_ms": 29.91,
+  "task_time_p50_ms": 6504.67,
+  "task_time_p99_ms": 7264.52
+}

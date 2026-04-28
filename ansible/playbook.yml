@@ -1,0 +1,7 @@
+---
+- name: Configure benchmark VMs and run benchmark
+  hosts: all
+  become: true
+  roles:
+    - benchmark-services
+    - benchmark-runner

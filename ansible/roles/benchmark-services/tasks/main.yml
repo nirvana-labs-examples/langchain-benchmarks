@@ -1,0 +1,41 @@
+---
+- name: Install Docker
+  apt:
+    name:
+      - docker.io
+      - docker-compose
+    state: present
+    update_cache: true
+
+- name: Start Docker service
+  service:
+    name: docker
+    state: started
+    enabled: true
+
+- name: Create benchmark directory
+  file:
+    path: /opt/benchmark
+    state: directory
+    mode: '0755'
+
+- name: Deploy docker-compose config
+  template:
+    src: docker-compose.yml.j2
+    dest: /opt/benchmark/docker-compose.yml
+    mode: '0644'
+
+- name: Start services
+  command: docker-compose up -d
+  args:
+    chdir: /opt/benchmark
+
+- name: Wait for services to be ready
+  wait_for:
+    port: "{{ item }}"
+    delay: 5
+    timeout: 60
+  loop:
+    - 5432  # Postgres
+    - 6333  # Qdrant
+    - 6379  # Redis
