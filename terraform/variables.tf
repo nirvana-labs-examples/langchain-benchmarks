@@ -14,11 +14,7 @@ variable "aws_region" {
   default     = "us-west-1"
 }
 
-variable "aws_ami_id" {
-  description = "Ubuntu AMI ID for AWS"
-  type        = string
-  default     = "ami-0ce2cb35386fc22e9"  # Ubuntu 24.04 in us-west-1
-}
+# Note: AMI is now dynamically looked up in main.tf (Ubuntu 24.04 LTS)
 
 variable "nirvana_region" {
   description = "Nirvana region"

@@ -1,18 +1,11 @@
 {
   "platform": "nirvana-abs",
-  "timestamp": "2026-04-28T02:47:22.032907",
-  "num_agents": 100,
-  "tasks_per_agent": 10,
-  "num_iterations": 3,
-  "total_operations": 21000,
-  "total_time_sec": 271.93,
-  "iops_total": 77.23,
-  "latency_p50_ms": 330.91,
-  "latency_p99_ms": 509.03,
-  "qdrant_write_p99_ms": 578.29,
-  "qdrant_read_p99_ms": 459.79,
-  "postgres_write_p99_ms": 87.77,
-  "redis_write_p99_ms": 17.12,
-  "task_time_p50_ms": 5355.03,
-  "task_time_p99_ms": 6571.95
+  "timestamp": "2026-04-29T00:38:21.953140",
+  "iops": 167.03,
+  "latency_p50_ms": 109.34,
+  "latency_p95_ms": 264.83,
+  "latency_p99_ms": 528.39,
+  "task_time_p50_ms": 10055.07,
+  "task_time_p95_ms": 11394.94,
+  "task_time_p99_ms": 12225.67
 }

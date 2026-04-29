@@ -1,231 +1,119 @@
 #!/usr/bin/env python3
 """
-LangChain-style benchmark for storage performance testing.
-Runs on VM against localhost services.
+LangChain-style benchmark: 100 agents × 10 tasks
+Measures: IOPS, latency (p50/p95/p99), task time
 """
 
-import asyncio
 import json
 import time
 import statistics
+import sys
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor
 import numpy as np
-
-# Database clients
 import psycopg2
 import redis
 from qdrant_client import QdrantClient
 from qdrant_client.models import VectorParams, Distance, PointStruct
 from sentence_transformers import SentenceTransformer
 
-# Configuration
 PLATFORM = "{{ platform_name }}"
-NUM_AGENTS = {{ num_agents }}
-TASKS_PER_AGENT = {{ tasks_per_agent }}
-NUM_ITERATIONS = {{ num_iterations }}
+NUM_AGENTS = 100
+TASKS_PER_AGENT = 10
 EMBEDDING_DIM = 384
-
-# Connection settings (localhost since running on VM)
-POSTGRES_HOST = "localhost"
-QDRANT_HOST = "localhost"
-REDIS_HOST = "localhost"
 
 
 class BenchmarkRunner:
     def __init__(self):
         self.embedder = SentenceTransformer('all-MiniLM-L6-v2')
-        self.latencies = {
-            'qdrant_write': [],
-            'qdrant_read': [],
-            'postgres_write': [],
-            'redis_write': []
-        }
+        self.latencies = []
         self.task_times = []
 
-    def get_postgres_conn(self):
-        return psycopg2.connect(
-            host=POSTGRES_HOST,
-            database="benchmark",
-            user="benchmark",
-            password="benchmark"
-        )
-
-    def get_qdrant_client(self):
-        return QdrantClient(host=QDRANT_HOST, port=6333)
-
-    def get_redis_client(self):
-        return redis.Redis(host=REDIS_HOST, port=6379, db=0)
-
     def setup(self):
-        """Initialize databases and collections."""
-        # Setup Postgres
-        conn = self.get_postgres_conn()
+        conn = psycopg2.connect(host="localhost", database="benchmark", user="benchmark", password="benchmark")
         cur = conn.cursor()
-        cur.execute("""
-            CREATE TABLE IF NOT EXISTS checkpoints (
-                id SERIAL PRIMARY KEY,
-                agent_id TEXT,
-                task_id TEXT,
-                state JSONB,
-                created_at TIMESTAMP DEFAULT NOW()
-            )
-        """)
+        cur.execute("""CREATE TABLE IF NOT EXISTS checkpoints (
+            id SERIAL PRIMARY KEY, agent_id TEXT, task_id TEXT, state JSONB, created_at TIMESTAMP DEFAULT NOW())""")
         conn.commit()
         cur.close()
         conn.close()
 
-        # Setup Qdrant
-        client = self.get_qdrant_client()
+        client = QdrantClient(host="localhost", port=6333)
         try:
             client.delete_collection("documents")
         except:
             pass
-        client.create_collection(
-            collection_name="documents",
-            vectors_config=VectorParams(size=EMBEDDING_DIM, distance=Distance.COSINE)
-        )
+        client.create_collection("documents", vectors_config=VectorParams(size=EMBEDDING_DIM, distance=Distance.COSINE))
 
     def run_agent_task(self, agent_id: int, task_id: int) -> float:
-        """Run a single agent task and return total time."""
         task_start = time.time()
-
-        qdrant = self.get_qdrant_client()
-        redis_client = self.get_redis_client()
-        pg_conn = self.get_postgres_conn()
+        qdrant = QdrantClient(host="localhost", port=6333)
+        redis_client = redis.Redis(host="localhost", port=6379, db=0)
+        pg_conn = psycopg2.connect(host="localhost", database="benchmark", user="benchmark", password="benchmark")
         pg_cur = pg_conn.cursor()
 
         try:
-            # 1. Ingest documents to Qdrant (vector writes)
+            # Vector writes
             docs = [f"Document {i} for agent {agent_id} task {task_id}" for i in range(10)]
             embeddings = self.embedder.encode(docs)
-
             for i, (doc, emb) in enumerate(zip(docs, embeddings)):
                 start = time.time()
-                point_id = agent_id * 10000 + task_id * 100 + i
-                qdrant.upsert(
-                    collection_name="documents",
-                    points=[PointStruct(id=point_id, vector=emb.tolist(), payload={"text": doc})]
-                )
-                self.latencies['qdrant_write'].append((time.time() - start) * 1000)
+                qdrant.upsert("documents", [PointStruct(id=agent_id*10000+task_id*100+i, vector=emb.tolist(), payload={"text": doc})])
+                self.latencies.append((time.time() - start) * 1000)
 
-            # 2. RAG queries (vector reads)
+            # Vector reads
             queries = [f"Query {i} from agent {agent_id}" for i in range(5)]
-            query_embeddings = self.embedder.encode(queries)
-
-            for qemb in query_embeddings:
+            for qemb in self.embedder.encode(queries):
                 start = time.time()
-                qdrant.search(
-                    collection_name="documents",
-                    query_vector=qemb.tolist(),
-                    limit=5
-                )
-                self.latencies['qdrant_read'].append((time.time() - start) * 1000)
+                qdrant.query_points("documents", query=qemb.tolist(), limit=5)
+                self.latencies.append((time.time() - start) * 1000)
 
-            # 3. Cache results in Redis
+            # Redis write
             start = time.time()
-            cache_key = f"agent:{agent_id}:task:{task_id}"
-            redis_client.setex(cache_key, 3600, json.dumps({"status": "completed"}))
-            self.latencies['redis_write'].append((time.time() - start) * 1000)
+            redis_client.setex(f"agent:{agent_id}:task:{task_id}", 3600, json.dumps({"status": "done"}))
+            self.latencies.append((time.time() - start) * 1000)
 
-            # 4. Save checkpoint to Postgres
+            # Postgres write
             start = time.time()
-            pg_cur.execute(
-                "INSERT INTO checkpoints (agent_id, task_id, state) VALUES (%s, %s, %s)",
-                (str(agent_id), str(task_id), json.dumps({"step": task_id, "status": "done"}))
-            )
+            pg_cur.execute("INSERT INTO checkpoints (agent_id, task_id, state) VALUES (%s, %s, %s)",
+                          (str(agent_id), str(task_id), json.dumps({"step": task_id})))
             pg_conn.commit()
-            self.latencies['postgres_write'].append((time.time() - start) * 1000)
-
+            self.latencies.append((time.time() - start) * 1000)
         finally:
             pg_cur.close()
             pg_conn.close()
 
-        task_time = (time.time() - task_start) * 1000
-        self.task_times.append(task_time)
-        return task_time
-
-    def run_warmup(self):
-        """Run warmup phase with fewer agents."""
-        print("Running warmup phase...", flush=True)
-        with ThreadPoolExecutor(max_workers=10) as executor:
-            futures = []
-            for agent_id in range(10):
-                for task_id in range(2):
-                    futures.append(executor.submit(self.run_agent_task, agent_id, task_id))
-            for f in futures:
-                f.result()
-        # Clear warmup metrics
-        for key in self.latencies:
-            self.latencies[key].clear()
-        self.task_times.clear()
-
-    def run_iteration(self):
-        """Run one iteration of the benchmark."""
-        with ThreadPoolExecutor(max_workers=NUM_AGENTS) as executor:
-            futures = []
-            for agent_id in range(NUM_AGENTS):
-                for task_id in range(TASKS_PER_AGENT):
-                    futures.append(executor.submit(self.run_agent_task, agent_id, task_id))
-            for f in futures:
-                f.result()
+        self.task_times.append((time.time() - task_start) * 1000)
 
     def run_benchmark(self):
-        """Run the full benchmark."""
         self.setup()
-        self.run_warmup()
 
-        all_latencies = {k: [] for k in self.latencies}
-        all_task_times = []
+        # Warmup
+        print("Warmup...", file=sys.stderr, flush=True)
+        with ThreadPoolExecutor(max_workers=10) as ex:
+            list(ex.map(lambda x: self.run_agent_task(x[0], x[1]), [(a, t) for a in range(10) for t in range(2)]))
+        self.latencies.clear()
+        self.task_times.clear()
 
-        for iteration in range(NUM_ITERATIONS):
-            print(f"Running iteration {iteration + 1}/{NUM_ITERATIONS}...", flush=True)
+        # Benchmark
+        print("Running benchmark...", file=sys.stderr, flush=True)
+        start = time.time()
+        with ThreadPoolExecutor(max_workers=NUM_AGENTS) as ex:
+            list(ex.map(lambda x: self.run_agent_task(x[0], x[1]), [(a, t) for a in range(NUM_AGENTS) for t in range(TASKS_PER_AGENT)]))
+        elapsed = time.time() - start
 
-            # Clear per-iteration metrics
-            for key in self.latencies:
-                self.latencies[key].clear()
-            self.task_times.clear()
-
-            start_time = time.time()
-            self.run_iteration()
-            iteration_time = time.time() - start_time
-
-            # Collect metrics
-            for key in self.latencies:
-                all_latencies[key].extend(self.latencies[key])
-            all_task_times.extend(self.task_times)
-
-        # Calculate final metrics
-        total_ops = sum(len(v) for v in all_latencies.values())
-        total_time = sum(all_task_times) / 1000  # Convert to seconds
-
-        all_latency_values = []
-        for v in all_latencies.values():
-            all_latency_values.extend(v)
-
-        results = {
+        return {
             "platform": PLATFORM,
             "timestamp": datetime.now().isoformat(),
-            "num_agents": NUM_AGENTS,
-            "tasks_per_agent": TASKS_PER_AGENT,
-            "num_iterations": NUM_ITERATIONS,
-            "total_operations": total_ops,
-            "total_time_sec": round(total_time, 2),
-            "iops_total": round(total_ops / total_time, 2),
-            "latency_p50_ms": round(statistics.median(all_latency_values), 2),
-            "latency_p99_ms": round(np.percentile(all_latency_values, 99), 2),
-            "qdrant_write_p99_ms": round(np.percentile(all_latencies['qdrant_write'], 99), 2),
-            "qdrant_read_p99_ms": round(np.percentile(all_latencies['qdrant_read'], 99), 2),
-            "postgres_write_p99_ms": round(np.percentile(all_latencies['postgres_write'], 99), 2),
-            "redis_write_p99_ms": round(np.percentile(all_latencies['redis_write'], 99), 2),
-            "task_time_p50_ms": round(statistics.median(all_task_times), 2),
-            "task_time_p99_ms": round(np.percentile(all_task_times, 99), 2)
+            "iops": round(len(self.latencies) / elapsed, 2),
+            "latency_p50_ms": round(np.percentile(self.latencies, 50), 2),
+            "latency_p95_ms": round(np.percentile(self.latencies, 95), 2),
+            "latency_p99_ms": round(np.percentile(self.latencies, 99), 2),
+            "task_time_p50_ms": round(np.percentile(self.task_times, 50), 2),
+            "task_time_p95_ms": round(np.percentile(self.task_times, 95), 2),
+            "task_time_p99_ms": round(np.percentile(self.task_times, 99), 2),
         }
-
-        return results
 
 
 if __name__ == "__main__":
-    runner = BenchmarkRunner()
-    results = runner.run_benchmark()
-    print(json.dumps(results, indent=2))
+    print(json.dumps(BenchmarkRunner().run_benchmark(), indent=2))

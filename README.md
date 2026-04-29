@@ -10,17 +10,51 @@ Runs **100 concurrent agents**, each executing **10 tasks** with vector storage 
 
 - [Terraform](https://terraform.io) installed
 - [Ansible](https://ansible.com) installed
-- AWS credentials configured (`aws configure` or environment variables)
-- Nirvana Labs API key (`export NIRVANA_LABS_API_KEY=...`)
-- SSH key pair
 
-### Step 1: Deploy VMs
+### Step 1: Configure Credentials
+
+**AWS Credentials:**
+```bash
+# Option A: Use AWS CLI
+aws configure
+
+# Option B: Environment variables
+export AWS_ACCESS_KEY_ID="..."
+export AWS_SECRET_ACCESS_KEY="..."
+export AWS_SESSION_TOKEN="..."  # if using temporary credentials
+```
+
+**Nirvana Labs API Key:**
+```bash
+# Get from https://dashboard.nirvanalabs.io/settings/api-keys
+export NIRVANA_LABS_API_KEY="..."
+```
+
+**SSH Key:**
+```bash
+# Generate if you don't have one
+ssh-keygen -t ed25519 -C "your-email@example.com"
+
+# Your public key is at ~/.ssh/id_ed25519.pub
+cat ~/.ssh/id_ed25519.pub
+```
+
+### Step 2: Configure Terraform
 
 ```bash
 cd terraform
 cp terraform.tfvars.example terraform.tfvars
-# Edit terraform.tfvars with your SSH public key and Nirvana project ID
+```
 
+Edit `terraform.tfvars`:
+```hcl
+ssh_public_key     = "ssh-ed25519 AAAA... your-email@example.com"
+nirvana_project_id = "your-project-id"  # Get from Nirvana dashboard
+```
+
+### Step 3: Deploy VMs
+
+```bash
 terraform init
 terraform apply
 ```
@@ -29,43 +63,15 @@ This deploys both VMs simultaneously:
 - **AWS**: m5.xlarge with 256GB gp3 storage (us-west-1)
 - **Nirvana**: n1-standard-4 with 256GB ABS storage (us-sva-2)
 
-#### Customizing Instance & Storage
-
-Edit `terraform.tfvars` to test different configurations:
-
-```hcl
-# AWS - try different instance sizes or storage types
-aws_instance_type      = "m5.2xlarge"   # larger instance
-aws_storage_size       = 512            # more storage
-aws_storage_type       = "io1"          # provisioned IOPS
-aws_storage_iops       = 10000          # higher IOPS
-
-# Nirvana - try different instance sizes
-nirvana_instance_type  = "n1-standard-8"
-nirvana_storage_size   = 512
-```
-
-### Step 2: Generate Ansible Inventory
+### Step 4: Generate Inventory & Verify SSH
 
 ```bash
 ./scripts/generate-inventory.sh
 ```
 
-### Step 3: Verify SSH Connectivity
+This generates the Ansible inventory and waits for SSH access (up to 60s).
 
-Before running Ansible, verify SSH access to both VMs:
-
-```bash
-# Get IPs from terraform output
-AWS_IP=$(cd terraform && terraform output -raw aws_ip)
-NIRVANA_IP=$(cd terraform && terraform output -raw nirvana_ip)
-
-# Test SSH (wait ~30 seconds after terraform for VMs to boot)
-ssh -o ConnectTimeout=10 ubuntu@$AWS_IP "echo 'AWS: OK'"
-ssh -o ConnectTimeout=10 ubuntu@$NIRVANA_IP "echo 'Nirvana: OK'"
-```
-
-### Step 4: Run Benchmark
+### Step 5: Run Benchmark
 
 ```bash
 cd ansible && ansible-playbook playbook.yml
@@ -79,20 +85,24 @@ This will:
 ## Results
 
 Results are saved to:
-- `ansible/results/aws-benchmark.json`
-- `ansible/results/nirvana-benchmark.json`
+- `ansible/results/nirvana-abs-benchmark.json`
+- `ansible/results/aws-gp3-benchmark.json`
 
-### Sample Results (On-VM)
+### Expected Results
 
-> **Note:** Results may vary based on cloud region load, time of day, and other factors. These are estimates from our testing.
+> **Note:** These are estimates from our testing. Your results will likely fall within this range depending on cloud region load, time of day, and other factors.
 
-| Metric | Nirvana ABS | AWS gp3 | Diff |
-|--------|-------------|---------|------|
-| IOPS | 77.23 | 63.10 | +22% |
-| Latency p50 | 330.91ms | 413.92ms | +20% |
-| Latency p99 | 509.03ms | 565.21ms | +10% |
-| Task Time p50 | 5355ms | 6505ms | +18% |
-| Task Time p99 | 6572ms | 7265ms | +10% |
+| Metric | Nirvana ABS | AWS gp3 | Improvement |
+|--------|-------------|---------|-------------|
+| **IOPS** | **167.25** | 123.58 | **+35%** |
+| Latency p50 | 108.10ms | 143.56ms | 25% lower |
+| Latency p95 | 256.10ms | 525.02ms | 51% lower |
+| Latency p99 | 545.78ms | 1,507.94ms | 64% lower |
+| **Task Time p50** | **9,998ms** | 13,237ms | **1.3x faster** |
+| **Task Time p95** | **11,466ms** | 19,754ms | **1.7x faster** |
+| **Task Time p99** | **12,981ms** | 22,441ms | **1.7x faster** |
+
+**Key Takeaway:** Nirvana ABS delivers **35% higher IOPS** and **1.7x faster task completion** under concurrent load, with significantly lower latency variance (64% lower p99).
 
 ### Deployment Time
 
@@ -105,40 +115,90 @@ Results are saved to:
 
 ## Test Configuration
 
+### Default Configuration
+
 | Parameter | AWS | Nirvana |
 |-----------|-----|---------|
-| **Instance Type** | m5.xlarge (4 vCPU, 16GB RAM) | n1-standard-4 (4 vCPU, 16GB RAM) |
+| **Instance Type** | m5.xlarge | n1-standard-4 |
+| **vCPU / RAM** | 4 vCPU / 16 GB | 4 vCPU / 16 GB |
 | **Storage Type** | gp3 (General Purpose SSD) | ABS (Accelerated Block Storage) |
 | **Storage Size** | 256 GB | 256 GB |
 | **IOPS** | 3,000 (baseline) | Dynamic |
 | **Region** | us-west-1 | us-sva-2 |
 
+### Available Instance Classes
+
+**AWS EC2 (m5 family):**
+| Instance | vCPU | RAM | Use Case |
+|----------|------|-----|----------|
+| m5.large | 2 | 8 GB | Light testing |
+| m5.xlarge | 4 | 16 GB | Default benchmark |
+| m5.2xlarge | 8 | 32 GB | Heavy workloads |
+| m5.4xlarge | 16 | 64 GB | Production scale |
+
+**Nirvana Labs:**
+| Instance | vCPU | RAM | Use Case |
+|----------|------|-----|----------|
+| n1-standard-2 | 2 | 8 GB | Light testing |
+| n1-standard-4 | 4 | 16 GB | Default benchmark |
+| n1-standard-8 | 8 | 32 GB | Heavy workloads |
+| n1-standard-16 | 16 | 64 GB | Production scale |
+
+**AWS Storage Types:**
+| Type | IOPS | Throughput | Use Case |
+|------|------|------------|----------|
+| gp3 | 3,000-16,000 | 125-1,000 MB/s | General purpose (default) |
+| gp2 | 100-16,000 | 128-250 MB/s | Legacy general purpose |
+| io1/io2 | Up to 64,000 | Up to 1,000 MB/s | High-performance |
+
+To change instance types, edit `terraform.tfvars`:
+```hcl
+aws_instance_type     = "m5.2xlarge"
+nirvana_instance_type = "n1-standard-8"
+```
+
 ## Architecture
 
 ```
-AWS (us-west-1)                    Nirvana (us-sva-2)
-+------------------+               +------------------+
-| m5.xlarge        |               | n1-standard-4    |
-| 256GB gp3        |               | 256GB ABS        |
-+------------------+               +------------------+
-| Docker Services: |               | Docker Services: |
-| - Postgres       |               | - Postgres       |
-| - Qdrant         |               | - Qdrant         |
-| - Redis          |               | - Redis          |
-+------------------+               +------------------+
-| Benchmark runs   |               | Benchmark runs   |
-| locally on VM    |               | locally on VM    |
-+------------------+               +------------------+
-        |                                  |
-        +----------------------------------+
-                        |
-                +---------------+
-                | Local Machine |
-                | (Ansible)     |
-                +---------------+
-                | Fetches       |
-                | results       |
-                +---------------+
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                              LOCAL MACHINE                                   │
+│  ┌─────────────┐    ┌─────────────┐    ┌─────────────┐                      │
+│  │  Terraform  │───▶│  Ansible    │───▶│  Results    │                      │
+│  │  (deploy)   │    │  (configure)│    │  (fetch)    │                      │
+│  └─────────────┘    └──────┬──────┘    └─────────────┘                      │
+└────────────────────────────┼────────────────────────────────────────────────┘
+                             │ SSH
+              ┌──────────────┴──────────────┐
+              ▼                              ▼
+┌─────────────────────────────┐  ┌─────────────────────────────┐
+│      AWS (us-west-1)        │  │    NIRVANA (us-sva-2)       │
+│  ┌───────────────────────┐  │  │  ┌───────────────────────┐  │
+│  │      m5.xlarge        │  │  │  │    n1-standard-4      │  │
+│  │   4 vCPU / 16GB RAM   │  │  │  │   4 vCPU / 16GB RAM   │  │
+│  ├───────────────────────┤  │  │  ├───────────────────────┤  │
+│  │    256GB gp3 SSD      │  │  │  │    256GB ABS SSD      │  │
+│  │    3,000 IOPS         │  │  │  │    Dynamic IOPS       │  │
+│  └───────────────────────┘  │  │  └───────────────────────┘  │
+│                             │  │                             │
+│  ┌───────────────────────┐  │  │  ┌───────────────────────┐  │
+│  │   Docker Services     │  │  │  │   Docker Services     │  │
+│  │  ┌─────┐ ┌─────┐     │  │  │  │  ┌─────┐ ┌─────┐     │  │
+│  │  │Qdrant│ │Redis│     │  │  │  │  │Qdrant│ │Redis│     │  │
+│  │  └─────┘ └─────┘     │  │  │  │  └─────┘ └─────┘     │  │
+│  │  ┌─────────────┐     │  │  │  │  ┌─────────────┐     │  │
+│  │  │  Postgres   │     │  │  │  │  │  Postgres   │     │  │
+│  │  └─────────────┘     │  │  │  │  └─────────────┘     │  │
+│  └───────────────────────┘  │  │  └───────────────────────┘  │
+│                             │  │                             │
+│  ┌───────────────────────┐  │  │  ┌───────────────────────┐  │
+│  │   Benchmark Runner    │  │  │  │   Benchmark Runner    │  │
+│  │  100 agents × 10 tasks│  │  │  │  100 agents × 10 tasks│  │
+│  │  - Vector writes      │  │  │  │  - Vector writes      │  │
+│  │  - RAG queries        │  │  │  │  - RAG queries        │  │
+│  │  - Cache ops          │  │  │  │  - Cache ops          │  │
+│  │  - Checkpoints        │  │  │  │  - Checkpoints        │  │
+│  └───────────────────────┘  │  │  └───────────────────────┘  │
+└─────────────────────────────┘  └─────────────────────────────┘
 ```
 
 ## What's Measured

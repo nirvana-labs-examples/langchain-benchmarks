@@ -25,6 +25,22 @@ provider "nirvana" {}
 # AWS RESOURCES
 # =============================================================================
 
+# Lookup latest Ubuntu 24.04 LTS AMI
+data "aws_ami" "ubuntu" {
+  most_recent = true
+  owners      = ["099720109477"]  # Canonical
+
+  filter {
+    name   = "name"
+    values = ["ubuntu/images/hvm-ssd-gp3/ubuntu-noble-24.04-amd64-server-*"]
+  }
+
+  filter {
+    name   = "virtualization-type"
+    values = ["hvm"]
+  }
+}
+
 resource "aws_vpc" "benchmark" {
   cidr_block           = "10.0.0.0/16"
   enable_dns_hostnames = true
@@ -103,7 +119,7 @@ resource "aws_key_pair" "benchmark" {
 }
 
 resource "aws_instance" "benchmark" {
-  ami                    = var.aws_ami_id
+  ami                    = data.aws_ami.ubuntu.id
   instance_type          = var.aws_instance_type
   subnet_id              = aws_subnet.benchmark.id
   vpc_security_group_ids = [aws_security_group.benchmark.id]
@@ -199,13 +215,18 @@ output "nirvana_ip" {
   description = "Nirvana VM public IP"
 }
 
+output "aws_ami" {
+  value       = data.aws_ami.ubuntu.name
+  description = "AWS AMI used"
+}
+
 output "next_steps" {
   value = <<-EOT
 
     VMs are ready! Next steps:
 
-    1. Configure VMs:    ./setup.sh
-    2. Run benchmark:    python benchmark.py
+    1. Generate inventory:  ./scripts/generate-inventory.sh
+    2. Run benchmark:       cd ansible && ansible-playbook playbook.yml
 
   EOT
 }

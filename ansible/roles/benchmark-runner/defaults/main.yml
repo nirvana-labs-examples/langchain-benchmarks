@@ -1,4 +1,2 @@
 ---
-num_agents: 100
-tasks_per_agent: 10
-num_iterations: 3
+# Platform name set via inventory (aws-gp3 or nirvana-abs)

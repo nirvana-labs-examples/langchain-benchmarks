@@ -7,6 +7,11 @@
     state: present
     update_cache: true
 
+- name: Wait for connection to recover
+  wait_for_connection:
+    delay: 5
+    timeout: 60
+
 - name: Start Docker service
   service:
     name: docker

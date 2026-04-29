@@ -53,3 +53,17 @@
     src: /opt/benchmark-runner/results.json
     dest: "results/{{ platform_name }}-benchmark.json"
     flat: yes
+
+- name: Display results
+  debug:
+    msg: |
+
+      ========== {{ platform_name | upper }} RESULTS ==========
+      IOPS:           {{ (benchmark_result.stdout | from_json).iops }}
+      Latency p50:    {{ (benchmark_result.stdout | from_json).latency_p50_ms }} ms
+      Latency p95:    {{ (benchmark_result.stdout | from_json).latency_p95_ms }} ms
+      Latency p99:    {{ (benchmark_result.stdout | from_json).latency_p99_ms }} ms
+      Task Time p50:  {{ (benchmark_result.stdout | from_json).task_time_p50_ms }} ms
+      Task Time p95:  {{ (benchmark_result.stdout | from_json).task_time_p95_ms }} ms
+      Task Time p99:  {{ (benchmark_result.stdout | from_json).task_time_p99_ms }} ms
+      ================================================
