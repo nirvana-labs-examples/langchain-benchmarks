@@ -118,7 +118,7 @@ resource "aws_key_pair" "benchmark" {
   public_key = var.ssh_public_key
 }
 
-resource "aws_instance" "benchmark" {
+resource "aws_instance" "gp3" {
   ami                    = data.aws_ami.ubuntu.id
   instance_type          = var.aws_instance_type
   subnet_id              = aws_subnet.benchmark.id
@@ -127,12 +127,28 @@ resource "aws_instance" "benchmark" {
 
   root_block_device {
     volume_size = var.aws_storage_size
-    volume_type = var.aws_storage_type
-    iops        = var.aws_storage_iops
-    throughput  = var.aws_storage_type == "gp3" ? var.aws_storage_throughput : null
+    volume_type = "gp3"
+    iops        = 3000
+    throughput  = 125
   }
 
-  tags = { Name = "langchain-bench-aws" }
+  tags = { Name = "langchain-bench-aws-gp3" }
+}
+
+resource "aws_instance" "io2" {
+  ami                    = data.aws_ami.ubuntu.id
+  instance_type          = var.aws_instance_type
+  subnet_id              = aws_subnet.benchmark.id
+  vpc_security_group_ids = [aws_security_group.benchmark.id]
+  key_name               = aws_key_pair.benchmark.key_name
+
+  root_block_device {
+    volume_size = var.aws_storage_size
+    volume_type = "io2"
+    iops        = 16000  # io2 supports up to 64,000 IOPS
+  }
+
+  tags = { Name = "langchain-bench-aws-io2" }
 }
 
 # =============================================================================
@@ -205,9 +221,14 @@ resource "nirvana_compute_vm" "benchmark" {
 # OUTPUTS
 # =============================================================================
 
-output "aws_ip" {
-  value       = aws_instance.benchmark.public_ip
-  description = "AWS VM public IP"
+output "aws_gp3_ip" {
+  value       = aws_instance.gp3.public_ip
+  description = "AWS gp3 VM public IP"
+}
+
+output "aws_io2_ip" {
+  value       = aws_instance.io2.public_ip
+  description = "AWS io2 VM public IP"
 }
 
 output "nirvana_ip" {

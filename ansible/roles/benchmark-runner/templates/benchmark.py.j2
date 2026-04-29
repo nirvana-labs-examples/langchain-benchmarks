@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
 """
-LangChain-style benchmark: 100 agents × 10 tasks
-Measures: IOPS, latency (p50/p95/p99), task time
+LangChain-style cold read benchmark.
+Populates data, drops OS caches, then measures cold read latency.
+Tests true disk performance, not memory cache.
 """
 
 import json
 import time
-import statistics
 import sys
+import subprocess
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor
 import numpy as np
@@ -21,15 +22,16 @@ PLATFORM = "{{ platform_name }}"
 NUM_AGENTS = 100
 TASKS_PER_AGENT = 10
 EMBEDDING_DIM = 384
+COLD_READ_QUERIES = 100
 
 
 class BenchmarkRunner:
     def __init__(self):
         self.embedder = SentenceTransformer('all-MiniLM-L6-v2')
-        self.latencies = []
-        self.task_times = []
+        self.cold_read_latencies = {"qdrant": [], "redis": [], "postgres": []}
 
     def setup(self):
+        """Initialize databases"""
         conn = psycopg2.connect(host="localhost", database="benchmark", user="benchmark", password="benchmark")
         cur = conn.cursor()
         cur.execute("""CREATE TABLE IF NOT EXISTS checkpoints (
@@ -45,73 +47,96 @@ class BenchmarkRunner:
             pass
         client.create_collection("documents", vectors_config=VectorParams(size=EMBEDDING_DIM, distance=Distance.COSINE))
 
-    def run_agent_task(self, agent_id: int, task_id: int) -> float:
-        task_start = time.time()
+    def populate_data(self, agent_id: int, task_id: int):
+        """Write data to all services (needed before cold reads)"""
         qdrant = QdrantClient(host="localhost", port=6333)
         redis_client = redis.Redis(host="localhost", port=6379, db=0)
         pg_conn = psycopg2.connect(host="localhost", database="benchmark", user="benchmark", password="benchmark")
         pg_cur = pg_conn.cursor()
 
         try:
-            # Vector writes
+            # Vector writes to Qdrant
             docs = [f"Document {i} for agent {agent_id} task {task_id}" for i in range(10)]
             embeddings = self.embedder.encode(docs)
             for i, (doc, emb) in enumerate(zip(docs, embeddings)):
-                start = time.time()
                 qdrant.upsert("documents", [PointStruct(id=agent_id*10000+task_id*100+i, vector=emb.tolist(), payload={"text": doc})])
-                self.latencies.append((time.time() - start) * 1000)
-
-            # Vector reads
-            queries = [f"Query {i} from agent {agent_id}" for i in range(5)]
-            for qemb in self.embedder.encode(queries):
-                start = time.time()
-                qdrant.query_points("documents", query=qemb.tolist(), limit=5)
-                self.latencies.append((time.time() - start) * 1000)
 
             # Redis write
-            start = time.time()
             redis_client.setex(f"agent:{agent_id}:task:{task_id}", 3600, json.dumps({"status": "done"}))
-            self.latencies.append((time.time() - start) * 1000)
 
             # Postgres write
-            start = time.time()
             pg_cur.execute("INSERT INTO checkpoints (agent_id, task_id, state) VALUES (%s, %s, %s)",
                           (str(agent_id), str(task_id), json.dumps({"step": task_id})))
             pg_conn.commit()
-            self.latencies.append((time.time() - start) * 1000)
         finally:
             pg_cur.close()
             pg_conn.close()
 
-        self.task_times.append((time.time() - task_start) * 1000)
+    def drop_os_caches(self):
+        """Drop OS page cache, dentries, and inodes"""
+        print("Dropping OS caches...", file=sys.stderr, flush=True)
+        subprocess.run(["sync"], check=True)
+        subprocess.run(["sh", "-c", "echo 3 > /proc/sys/vm/drop_caches"], check=True)
+        time.sleep(2)
+
+    def run_cold_reads(self):
+        """Run cold read operations after dropping OS caches"""
+        print("Running cold read benchmark...", file=sys.stderr, flush=True)
+
+        # Cold reads from Qdrant (vector similarity search)
+        qdrant = QdrantClient(host="localhost", port=6333)
+        queries = [f"Cold query {i}" for i in range(COLD_READ_QUERIES)]
+        for qemb in self.embedder.encode(queries):
+            start = time.time()
+            qdrant.query_points("documents", query=qemb.tolist(), limit=10)
+            self.cold_read_latencies["qdrant"].append((time.time() - start) * 1000)
+
+        # Cold reads from Redis
+        redis_client = redis.Redis(host="localhost", port=6379, db=0)
+        for i in range(COLD_READ_QUERIES):
+            agent_id = i % NUM_AGENTS
+            task_id = i % TASKS_PER_AGENT
+            start = time.time()
+            redis_client.get(f"agent:{agent_id}:task:{task_id}")
+            self.cold_read_latencies["redis"].append((time.time() - start) * 1000)
+
+        # Cold reads from Postgres
+        pg_conn = psycopg2.connect(host="localhost", database="benchmark", user="benchmark", password="benchmark")
+        pg_cur = pg_conn.cursor()
+        for i in range(COLD_READ_QUERIES):
+            agent_id = i % NUM_AGENTS
+            start = time.time()
+            pg_cur.execute("SELECT * FROM checkpoints WHERE agent_id = %s ORDER BY created_at DESC LIMIT 5", (str(agent_id),))
+            pg_cur.fetchall()
+            self.cold_read_latencies["postgres"].append((time.time() - start) * 1000)
+        pg_cur.close()
+        pg_conn.close()
 
     def run_benchmark(self):
         self.setup()
 
-        # Warmup
-        print("Warmup...", file=sys.stderr, flush=True)
-        with ThreadPoolExecutor(max_workers=10) as ex:
-            list(ex.map(lambda x: self.run_agent_task(x[0], x[1]), [(a, t) for a in range(10) for t in range(2)]))
-        self.latencies.clear()
-        self.task_times.clear()
-
-        # Benchmark
-        print("Running benchmark...", file=sys.stderr, flush=True)
-        start = time.time()
+        # Populate data (writes to all services)
+        print("Populating data...", file=sys.stderr, flush=True)
         with ThreadPoolExecutor(max_workers=NUM_AGENTS) as ex:
-            list(ex.map(lambda x: self.run_agent_task(x[0], x[1]), [(a, t) for a in range(NUM_AGENTS) for t in range(TASKS_PER_AGENT)]))
-        elapsed = time.time() - start
+            list(ex.map(lambda x: self.populate_data(x[0], x[1]),
+                       [(a, t) for a in range(NUM_AGENTS) for t in range(TASKS_PER_AGENT)]))
+
+        # Drop caches and run cold reads
+        self.drop_os_caches()
+        self.run_cold_reads()
 
         return {
             "platform": PLATFORM,
             "timestamp": datetime.now().isoformat(),
-            "iops": round(len(self.latencies) / elapsed, 2),
-            "latency_p50_ms": round(np.percentile(self.latencies, 50), 2),
-            "latency_p95_ms": round(np.percentile(self.latencies, 95), 2),
-            "latency_p99_ms": round(np.percentile(self.latencies, 99), 2),
-            "task_time_p50_ms": round(np.percentile(self.task_times, 50), 2),
-            "task_time_p95_ms": round(np.percentile(self.task_times, 95), 2),
-            "task_time_p99_ms": round(np.percentile(self.task_times, 99), 2),
+            "cold_read_qdrant_p50_ms": round(np.percentile(self.cold_read_latencies["qdrant"], 50), 2),
+            "cold_read_qdrant_p95_ms": round(np.percentile(self.cold_read_latencies["qdrant"], 95), 2),
+            "cold_read_qdrant_p99_ms": round(np.percentile(self.cold_read_latencies["qdrant"], 99), 2),
+            "cold_read_redis_p50_ms": round(np.percentile(self.cold_read_latencies["redis"], 50), 2),
+            "cold_read_redis_p95_ms": round(np.percentile(self.cold_read_latencies["redis"], 95), 2),
+            "cold_read_redis_p99_ms": round(np.percentile(self.cold_read_latencies["redis"], 99), 2),
+            "cold_read_postgres_p50_ms": round(np.percentile(self.cold_read_latencies["postgres"], 50), 2),
+            "cold_read_postgres_p95_ms": round(np.percentile(self.cold_read_latencies["postgres"], 95), 2),
+            "cold_read_postgres_p99_ms": round(np.percentile(self.cold_read_latencies["postgres"], 99), 2),
         }
 
 

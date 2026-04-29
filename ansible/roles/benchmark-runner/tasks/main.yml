@@ -1,10 +1,16 @@
 ---
-- name: Install Python and pip
+# =============================================================================
+# COLD READ BENCHMARK
+# All tests drop OS caches before reading to measure true disk performance.
+# =============================================================================
+
+- name: Install Python, pip, and fio
   apt:
     name:
       - python3
       - python3-pip
       - python3-venv
+      - fio
     state: present
     update_cache: true
 
@@ -13,6 +19,65 @@
     path: /opt/benchmark-runner
     state: directory
     mode: '0755'
+
+# =============================================================================
+# RAW DISK COLD READ (fio)
+# =============================================================================
+
+- name: Write test file for cold read
+  shell: |
+    fio --name=write_test \
+        --ioengine=libaio \
+        --direct=1 \
+        --bs=4k \
+        --iodepth=64 \
+        --size=1G \
+        --rw=write \
+        --numjobs=4 \
+        --filename=/opt/benchmark-runner/cold_read_test
+
+- name: Drop OS caches
+  shell: sync && echo 3 > /proc/sys/vm/drop_caches
+
+- name: Run fio cold read benchmark
+  shell: |
+    fio --name=cold_read \
+        --ioengine=libaio \
+        --direct=1 \
+        --bs=4k \
+        --iodepth=64 \
+        --size=1G \
+        --rw=read \
+        --numjobs=4 \
+        --runtime=30 \
+        --time_based \
+        --group_reporting \
+        --output-format=json \
+        --filename=/opt/benchmark-runner/cold_read_test
+  register: fio_result
+
+- name: Parse fio results
+  set_fact:
+    fio_cold_read_iops: "{{ (fio_result.stdout | from_json).jobs[0].read.iops | round(0) }}"
+    fio_cold_read_lat_us: "{{ (fio_result.stdout | from_json).jobs[0].read.lat_ns.mean / 1000 | round(2) }}"
+
+- name: Display fio cold read results
+  debug:
+    msg: |
+
+      ========== {{ platform_name | upper }} RAW DISK (fio) ==========
+      Cold Read IOPS:     {{ fio_cold_read_iops }}
+      Cold Read Latency:  {{ fio_cold_read_lat_us }} us
+      ================================================
+
+- name: Cleanup fio test file
+  file:
+    path: /opt/benchmark-runner/cold_read_test
+    state: absent
+
+# =============================================================================
+# APPLICATION COLD READ (LangChain)
+# =============================================================================
 
 - name: Copy benchmark script
   template:
@@ -35,17 +100,24 @@
       - numpy
     virtualenv: /opt/benchmark-runner/venv
 
-- name: Run benchmark
+- name: Run cold read benchmark
   command: /opt/benchmark-runner/venv/bin/python /opt/benchmark-runner/benchmark.py
   args:
     chdir: /opt/benchmark-runner
   register: benchmark_result
-  async: 1800  # 30 minute timeout
-  poll: 30     # Check every 30 seconds
+  async: 1800
+  poll: 30
+
+- name: Combine results
+  set_fact:
+    combined_results: "{{ (benchmark_result.stdout | from_json) | combine({
+      'fio_cold_read_iops': fio_cold_read_iops | int,
+      'fio_cold_read_latency_us': fio_cold_read_lat_us | float
+    }) }}"
 
 - name: Save results to file
   copy:
-    content: "{{ benchmark_result.stdout }}"
+    content: "{{ combined_results | to_nice_json }}"
     dest: /opt/benchmark-runner/results.json
 
 - name: Fetch results to local
@@ -58,12 +130,20 @@
   debug:
     msg: |
 
-      ========== {{ platform_name | upper }} RESULTS ==========
-      IOPS:           {{ (benchmark_result.stdout | from_json).iops }}
-      Latency p50:    {{ (benchmark_result.stdout | from_json).latency_p50_ms }} ms
-      Latency p95:    {{ (benchmark_result.stdout | from_json).latency_p95_ms }} ms
-      Latency p99:    {{ (benchmark_result.stdout | from_json).latency_p99_ms }} ms
-      Task Time p50:  {{ (benchmark_result.stdout | from_json).task_time_p50_ms }} ms
-      Task Time p95:  {{ (benchmark_result.stdout | from_json).task_time_p95_ms }} ms
-      Task Time p99:  {{ (benchmark_result.stdout | from_json).task_time_p99_ms }} ms
+      ========== {{ platform_name | upper }} COLD READ RESULTS ==========
+
+      RAW DISK (fio):
+        Cold Read IOPS:     {{ fio_cold_read_iops }}
+        Cold Read Latency:  {{ fio_cold_read_lat_us }} us
+
+      APPLICATION (after dropping OS caches):
+        Qdrant p50:   {{ combined_results.cold_read_qdrant_p50_ms }} ms
+        Qdrant p95:   {{ combined_results.cold_read_qdrant_p95_ms }} ms
+        Qdrant p99:   {{ combined_results.cold_read_qdrant_p99_ms }} ms
+        Redis p50:    {{ combined_results.cold_read_redis_p50_ms }} ms
+        Redis p95:    {{ combined_results.cold_read_redis_p95_ms }} ms
+        Redis p99:    {{ combined_results.cold_read_redis_p99_ms }} ms
+        Postgres p50: {{ combined_results.cold_read_postgres_p50_ms }} ms
+        Postgres p95: {{ combined_results.cold_read_postgres_p95_ms }} ms
+        Postgres p99: {{ combined_results.cold_read_postgres_p99_ms }} ms
       ================================================
