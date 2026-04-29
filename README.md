@@ -55,9 +55,11 @@ terraform init
 terraform apply
 ```
 
-Deploys 3 VMs:
-- **AWS gp3**: m5.xlarge, 256GB, 3,000 IOPS baseline
-- **AWS io2**: m5.xlarge, 256GB, 16,000 provisioned IOPS
+Deploys 5 VMs:
+- **AWS gp3-3k**: m6i.xlarge, 256GB, 3,000 IOPS
+- **AWS gp3-16k**: m6i.xlarge, 256GB, 16,000 IOPS
+- **AWS io2-32k**: m6i.xlarge, 256GB, 32,000 IOPS
+- **AWS io2-64k**: m6i.xlarge, 256GB, 64,000 IOPS (capped at instance limit)
 - **Nirvana**: n1-standard-4, 256GB ABS (dynamic IOPS)
 
 ### Step 4: Generate Inventory
@@ -87,55 +89,60 @@ cd terraform && terraform destroy
 
 ### Raw Disk Cold Read (fio)
 
-| Metric | AWS gp3 | AWS io2 | Nirvana ABS | ABS vs gp3 |
-|--------|---------|---------|-------------|------------|
-| **Cold Read IOPS** | 3,098 | 16,533 | **162,379** | 52x |
-| Cold Read Latency | 82,620 us | 15,481 us | **1,576 us** | 52x lower |
+| Platform | Provisioned IOPS | Measured IOPS | Latency |
+|----------|------------------|---------------|---------|
+| gp3-3k | 3,000 | 3,097 | 82,639 us |
+| gp3-16k | 16,000 | 16,531 | 15,484 us |
+| io2-32k | 32,000 | 33,071 | 7,740 us |
+| io2-64k | 64,000 | 40,339* | 6,345 us |
+| **Nirvana ABS** | Dynamic | **216,751** | **1,181 us** |
+
+\* io2-64k capped at m6i.xlarge instance limit (40,000 IOPS)
 
 ### Application Cold Read (LangChain)
 
-| Service | AWS gp3 p50 | AWS io2 p50 | Nirvana ABS p50 |
-|---------|-------------|-------------|-----------------|
-| Qdrant (vector) | 2.60 ms | 2.99 ms | **2.47 ms** |
-| Redis (cache) | 0.12 ms | 0.13 ms | 0.15 ms |
-| Postgres (checkpoint) | 0.31 ms | 0.30 ms | **0.26 ms** |
+| Platform | Qdrant p50 | Redis p50 | Postgres p50 |
+|----------|------------|-----------|--------------|
+| gp3-3k | 2.00 ms | 0.10 ms | 0.23 ms |
+| gp3-16k | 2.43 ms | 0.10 ms | 0.21 ms |
+| io2-32k | 2.39 ms | 0.10 ms | 0.23 ms |
+| io2-64k | 2.18 ms | 0.10 ms | 0.21 ms |
+| Nirvana ABS | 2.19 ms | 0.14 ms | 0.21 ms |
 
 ### Key Takeaways
 
-1. **Nirvana ABS** delivers **162k cold read IOPS** vs io2's 16.5k (10x) and gp3's 3k (52x)
+1. **Nirvana ABS** delivers **217k cold read IOPS** vs AWS's best io2 (40k) = **5.4x faster**
 2. **Cold reads confirm** we're measuring actual disk I/O, not memory cache
-3. Application cold reads show similar patterns across services
+3. AWS io2-64k was capped by m6i.xlarge instance limit (40k) despite 64k provisioned IOPS
+4. Application latency shows less variance across platforms - dominated by application/network layer
 
 ## Test Configuration
 
-| Parameter | AWS gp3 | AWS io2 | Nirvana |
-|-----------|---------|---------|---------|
-| Instance Type | m5.xlarge | m5.xlarge | n1-standard-4 |
-| vCPU / RAM | 4 / 16 GB | 4 / 16 GB | 4 / 16 GB |
-| Storage | gp3 | io2 | ABS |
-| Size | 256 GB | 256 GB | 256 GB |
-| Provisioned IOPS | 3,000 | 16,000 | Dynamic |
+| Parameter | gp3-3k | gp3-16k | io2-32k | io2-64k | Nirvana |
+|-----------|--------|---------|---------|---------|---------|
+| Instance Type | m6i.xlarge | m6i.xlarge | m6i.xlarge | m6i.xlarge | n1-standard-4 |
+| vCPU / RAM | 4 / 16 GB | 4 / 16 GB | 4 / 16 GB | 4 / 16 GB | 4 / 16 GB |
+| Storage Type | gp3 | gp3 | io2 | io2 | ABS |
+| Size | 256 GB | 256 GB | 256 GB | 256 GB | 256 GB |
+| Provisioned IOPS | 3,000 | 16,000 | 32,000 | 64,000 | Dynamic |
+| Instance Max IOPS | 40,000 | 40,000 | 40,000 | 40,000 | N/A |
 
 ## Architecture
 
 ```
-┌─────────────────────────────────────────────────────────────────────────────┐
-│                              LOCAL MACHINE                                   │
-│  ┌─────────────┐    ┌─────────────┐    ┌─────────────┐                      │
-│  │  Terraform  │───▶│  Ansible    │───▶│  Results    │                      │
-│  └─────────────┘    └──────┬──────┘    └─────────────┘                      │
-└────────────────────────────┼────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────────────────────────────────┐
+│                                      LOCAL MACHINE                                        │
+│  ┌─────────────┐    ┌─────────────┐    ┌─────────────┐                                   │
+│  │  Terraform  │───▶│  Ansible    │───▶│  Results    │                                   │
+│  └─────────────┘    └──────┬──────┘    └─────────────┘                                   │
+└────────────────────────────┼─────────────────────────────────────────────────────────────┘
                              │ SSH
-         ┌───────────────────┼───────────────────┐
-         ▼                   ▼                   ▼
-┌─────────────────┐ ┌─────────────────┐ ┌─────────────────┐
-│   AWS gp3       │ │   AWS io2       │ │   Nirvana ABS   │
-│   256GB/3k IOPS │ │   256GB/16k IOPS│ │   256GB/dynamic │
-├─────────────────┤ ├─────────────────┤ ├─────────────────┤
-│ 1. Write data   │ │ 1. Write data   │ │ 1. Write data   │
-│ 2. Drop caches  │ │ 2. Drop caches  │ │ 2. Drop caches  │
-│ 3. Cold read    │ │ 3. Cold read    │ │ 3. Cold read    │
-└─────────────────┘ └─────────────────┘ └─────────────────┘
+    ┌────────────┬───────────┼───────────┬────────────┐
+    ▼            ▼           ▼           ▼            ▼
+┌────────┐ ┌────────┐ ┌────────┐ ┌────────┐ ┌──────────────┐
+│ gp3-3k │ │gp3-16k │ │io2-32k │ │io2-64k │ │ Nirvana ABS  │
+│ 3k IOPS│ │16k IOPS│ │32k IOPS│ │64k IOPS│ │ dynamic IOPS │
+└────────┘ └────────┘ └────────┘ └────────┘ └──────────────┘
 ```
 
 ## How Cold Reads Work

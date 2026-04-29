@@ -1,0 +1,15 @@
+{
+    "cold_read_postgres_p50_ms": 0.21,
+    "cold_read_postgres_p95_ms": 0.24,
+    "cold_read_postgres_p99_ms": 0.55,
+    "cold_read_qdrant_p50_ms": 2.18,
+    "cold_read_qdrant_p95_ms": 3.07,
+    "cold_read_qdrant_p99_ms": 13.88,
+    "cold_read_redis_p50_ms": 0.1,
+    "cold_read_redis_p95_ms": 0.12,
+    "cold_read_redis_p99_ms": 0.13,
+    "fio_cold_read_iops": 40339,
+    "fio_cold_read_latency_us": 6345.002926546,
+    "platform": "io2-64k",
+    "timestamp": "2026-04-29T17:14:06.510378"
+}
