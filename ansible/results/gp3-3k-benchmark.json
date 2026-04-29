@@ -1,15 +1,16 @@
 {
-    "cold_read_postgres_p50_ms": 0.23,
-    "cold_read_postgres_p95_ms": 0.25,
-    "cold_read_postgres_p99_ms": 0.57,
-    "cold_read_qdrant_p50_ms": 2.0,
-    "cold_read_qdrant_p95_ms": 3.31,
-    "cold_read_qdrant_p99_ms": 10.73,
-    "cold_read_redis_p50_ms": 0.1,
-    "cold_read_redis_p95_ms": 0.12,
-    "cold_read_redis_p99_ms": 0.13,
-    "fio_cold_read_iops": 3097,
-    "fio_cold_read_latency_us": 82638.520009618,
+    "benchmark_duration_s": 63.98,
+    "fio_iops": 3099,
+    "fio_latency_us": 82601.433163553,
+    "iops": 93.78,
+    "latency_p50_ms": 6.14,
+    "latency_p95_ms": 24.75,
+    "latency_p99_ms": 41.72,
     "platform": "gp3-3k",
-    "timestamp": "2026-04-29T17:14:11.454383"
+    "task_time_p50_ms": 619.02,
+    "task_time_p95_ms": 829.53,
+    "task_time_p99_ms": 889.25,
+    "timestamp": "2026-04-29T19:44:44.703905",
+    "total_operations": 6000,
+    "total_tasks": 1000
 }

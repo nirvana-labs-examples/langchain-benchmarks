@@ -76,7 +76,7 @@
     state: absent
 
 # =============================================================================
-# APPLICATION COLD READ (LangChain)
+# LANGCHAIN BENCHMARK
 # =============================================================================
 
 - name: Copy benchmark script
@@ -100,7 +100,7 @@
       - numpy
     virtualenv: /opt/benchmark-runner/venv
 
-- name: Run cold read benchmark
+- name: Run LangChain benchmark
   command: /opt/benchmark-runner/venv/bin/python /opt/benchmark-runner/benchmark.py
   args:
     chdir: /opt/benchmark-runner
@@ -111,8 +111,8 @@
 - name: Combine results
   set_fact:
     combined_results: "{{ (benchmark_result.stdout | from_json) | combine({
-      'fio_cold_read_iops': fio_cold_read_iops | int,
-      'fio_cold_read_latency_us': fio_cold_read_lat_us | float
+      'fio_iops': fio_cold_read_iops | int,
+      'fio_latency_us': fio_cold_read_lat_us | float
     }) }}"
 
 - name: Save results to file
@@ -130,20 +130,18 @@
   debug:
     msg: |
 
-      ========== {{ platform_name | upper }} COLD READ RESULTS ==========
+      ========== {{ platform_name | upper }} BENCHMARK RESULTS ==========
 
       RAW DISK (fio):
-        Cold Read IOPS:     {{ fio_cold_read_iops }}
-        Cold Read Latency:  {{ fio_cold_read_lat_us }} us
+        IOPS:     {{ fio_cold_read_iops }}
+        Latency:  {{ fio_cold_read_lat_us }} us
 
-      APPLICATION (after dropping OS caches):
-        Qdrant p50:   {{ combined_results.cold_read_qdrant_p50_ms }} ms
-        Qdrant p95:   {{ combined_results.cold_read_qdrant_p95_ms }} ms
-        Qdrant p99:   {{ combined_results.cold_read_qdrant_p99_ms }} ms
-        Redis p50:    {{ combined_results.cold_read_redis_p50_ms }} ms
-        Redis p95:    {{ combined_results.cold_read_redis_p95_ms }} ms
-        Redis p99:    {{ combined_results.cold_read_redis_p99_ms }} ms
-        Postgres p50: {{ combined_results.cold_read_postgres_p50_ms }} ms
-        Postgres p95: {{ combined_results.cold_read_postgres_p95_ms }} ms
-        Postgres p99: {{ combined_results.cold_read_postgres_p99_ms }} ms
+      LANGCHAIN:
+        IOPS:           {{ combined_results.iops }}
+        Latency p50:    {{ combined_results.latency_p50_ms }} ms
+        Latency p95:    {{ combined_results.latency_p95_ms }} ms
+        Latency p99:    {{ combined_results.latency_p99_ms }} ms
+        Task Time p50:  {{ combined_results.task_time_p50_ms }} ms
+        Task Time p95:  {{ combined_results.task_time_p95_ms }} ms
+        Task Time p99:  {{ combined_results.task_time_p99_ms }} ms
       ================================================

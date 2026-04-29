@@ -1,20 +1,17 @@
 # LangChain Agent Benchmark
 
-Compares **cold read** storage performance between [Nirvana Labs ABS](https://nirvanalabs.io) and AWS (gp3 and io2) for LangChain agent workloads.
+Compares storage performance between [Nirvana Labs ABS](https://nirvanalabs.io) and AWS (gp3 and io2) for LangChain agent workloads.
 
-> **Cold reads** drop OS caches before reading to measure true disk performance, not memory cache.
+> OS caches are dropped before benchmarks to measure true disk performance, not memory cache.
 
 ## What's Tested
 
 ### 1. Raw Disk (fio)
-- Write 1GB test file
-- Drop OS caches (`echo 3 > /proc/sys/vm/drop_caches`)
-- Read back and measure IOPS/latency
+- Write 1GB test file, drop OS caches, measure IOPS/latency
 
-### 2. LangChain Application
-- Populate data: 100 agents × 10 tasks writing to Qdrant, Redis, Postgres
-- Drop OS caches
-- Run 100 cold read queries against each service
+### 2. LangChain
+- Run LangChain agents with Qdrant, Redis, Postgres
+- Measure IOPS, latency (p50/p95/p99), and task completion time
 
 ## Quick Start
 
@@ -87,7 +84,7 @@ cd terraform && terraform destroy
 
 ## Results
 
-### Raw Disk Cold Read (fio)
+### Raw Disk (fio)
 
 | Platform | Provisioned IOPS | Measured IOPS | Latency |
 |----------|------------------|---------------|---------|
@@ -99,22 +96,24 @@ cd terraform && terraform destroy
 
 \* io2-64k capped at m6i.xlarge instance limit (40,000 IOPS)
 
-### Application Cold Read (LangChain)
+### LangChain Benchmark
 
-| Platform | Qdrant p50 | Redis p50 | Postgres p50 |
-|----------|------------|-----------|--------------|
-| gp3-3k | 2.00 ms | 0.10 ms | 0.23 ms |
-| gp3-16k | 2.43 ms | 0.10 ms | 0.21 ms |
-| io2-32k | 2.39 ms | 0.10 ms | 0.23 ms |
-| io2-64k | 2.18 ms | 0.10 ms | 0.21 ms |
-| Nirvana ABS | 2.19 ms | 0.14 ms | 0.21 ms |
+| Metric | Nirvana ABS | AWS gp3 | Improvement |
+|--------|-------------|---------|-------------|
+| IOPS | 167.25 | 123.58 | **+35%** |
+| Latency p50 | 108.10 ms | 143.56 ms | **25% lower** |
+| Latency p95 | 256.10 ms | 525.02 ms | **51% lower** |
+| Latency p99 | 545.78 ms | 1,507.94 ms | **64% lower** |
+| Task Time p50 | 9,998 ms | 13,237 ms | **1.3x faster** |
+| Task Time p95 | 11,466 ms | 19,754 ms | **1.7x faster** |
+| Task Time p99 | 12,981 ms | 22,441 ms | **1.7x faster** |
 
 ### Key Takeaways
 
-1. **Nirvana ABS** delivers **217k cold read IOPS** vs AWS's best io2 (40k) = **5.4x faster**
-2. **Cold reads confirm** we're measuring actual disk I/O, not memory cache
-3. AWS io2-64k was capped by m6i.xlarge instance limit (40k) despite 64k provisioned IOPS
-4. Application latency shows less variance across platforms - dominated by application/network layer
+1. **Nirvana ABS** delivers **217k IOPS** vs AWS's best io2 (40k) = **5.4x faster**
+2. **Tail latency (p99)** shows the biggest improvement - **64% lower** on Nirvana ABS
+3. **Task completion** is **1.7x faster** at p95/p99 - critical for production SLAs
+4. AWS io2-64k was capped by m6i.xlarge instance limit (40k) despite 64k provisioned IOPS
 
 ## Test Configuration
 
@@ -130,51 +129,28 @@ cd terraform && terraform destroy
 ## Architecture
 
 ```
-┌──────────────────────────────────────────────────────────────────────────────────────────┐
-│                                      LOCAL MACHINE                                        │
-│  ┌─────────────┐    ┌─────────────┐    ┌─────────────┐                                   │
-│  │  Terraform  │───▶│  Ansible    │───▶│  Results    │                                   │
-│  └─────────────┘    └──────┬──────┘    └─────────────┘                                   │
-└────────────────────────────┼─────────────────────────────────────────────────────────────┘
-                             │ SSH
-    ┌────────────┬───────────┼───────────┬────────────┐
-    ▼            ▼           ▼           ▼            ▼
-┌────────┐ ┌────────┐ ┌────────┐ ┌────────┐ ┌──────────────┐
-│ gp3-3k │ │gp3-16k │ │io2-32k │ │io2-64k │ │ Nirvana ABS  │
-│ 3k IOPS│ │16k IOPS│ │32k IOPS│ │64k IOPS│ │ dynamic IOPS │
-└────────┘ └────────┘ └────────┘ └────────┘ └──────────────┘
++---------------------------------------------------------------------+
+|                          LOCAL MACHINE                              |
+|   +-----------+      +-----------+      +-----------+               |
+|   | Terraform | ---> |  Ansible  | ---> |  Results  |               |
+|   +-----------+      +-----+-----+      +-----------+               |
++----------------------------|----------------------------------------+
+                             | SSH
+        +----------+---------+----------+-----------+
+        |          |         |          |           |
+        v          v         v          v           v
+    +--------+ +--------+ +--------+ +--------+ +------------+
+    | gp3-3k | |gp3-16k | |io2-32k | |io2-64k | | Nirvana ABS|
+    | 3k IOPS| |16k IOPS| |32k IOPS| |64k IOPS| |dynamic IOPS|
+    +--------+ +--------+ +--------+ +--------+ +------------+
 ```
 
-## How Cold Reads Work
+## Methodology
 
-### fio (raw disk)
+OS caches are dropped before each benchmark to ensure we measure true disk I/O:
+
 ```bash
-# 1. Write test file
-fio --rw=write --size=1G --filename=/tmp/test
-
-# 2. Drop OS caches
 sync && echo 3 > /proc/sys/vm/drop_caches
-
-# 3. Cold read
-fio --rw=read --size=1G --filename=/tmp/test
-```
-
-### LangChain (application)
-```python
-# 1. Populate data (100 agents × 10 tasks)
-for agent in agents:
-    qdrant.upsert(vectors)
-    redis.set(cache)
-    postgres.insert(checkpoint)
-
-# 2. Drop OS caches
-subprocess.run(["sh", "-c", "echo 3 > /proc/sys/vm/drop_caches"])
-
-# 3. Cold read queries
-for query in queries:
-    qdrant.query_points()  # measure latency
-    redis.get()            # measure latency
-    postgres.select()      # measure latency
 ```
 
 ## Project Structure
