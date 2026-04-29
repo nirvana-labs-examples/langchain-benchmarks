@@ -29,7 +29,7 @@ variable "nirvana_region" {
 variable "aws_instance_type" {
   description = "AWS EC2 instance type"
   type        = string
-  default     = "m5.xlarge"
+  default     = "m6i.xlarge"  # 40k IOPS max (vs m5.xlarge's 18.7k)
 }
 
 variable "aws_storage_size" {

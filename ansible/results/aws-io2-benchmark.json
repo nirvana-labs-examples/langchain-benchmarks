@@ -1,0 +1,23 @@
+{
+    "cold_read_postgres_p50_ms": 0.3,
+    "cold_read_postgres_p99_ms": 12.98,
+    "cold_read_qdrant_p50_ms": 2.99,
+    "cold_read_qdrant_p99_ms": 4.27,
+    "cold_read_redis_p50_ms": 0.13,
+    "cold_read_redis_p99_ms": 0.51,
+    "disk_cold_read_iops": 16533,
+    "disk_cold_read_latency_us": 15481.081149719,
+    "disk_read_iops": 11550,
+    "disk_read_latency_us": 15503.760431396,
+    "disk_write_iops": 4965,
+    "disk_write_latency_us": 15488.087318891,
+    "iops": 123.81,
+    "latency_p50_ms": 147.54,
+    "latency_p95_ms": 358.6,
+    "latency_p99_ms": 602.07,
+    "platform": "aws-io2",
+    "task_time_p50_ms": 13574.9,
+    "task_time_p95_ms": 16395.35,
+    "task_time_p99_ms": 18385.61,
+    "timestamp": "2026-04-29T15:10:43.811594"
+}

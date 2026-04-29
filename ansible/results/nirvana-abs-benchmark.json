@@ -1,11 +1,15 @@
 {
-  "platform": "nirvana-abs",
-  "timestamp": "2026-04-29T00:38:21.953140",
-  "iops": 167.03,
-  "latency_p50_ms": 109.34,
-  "latency_p95_ms": 264.83,
-  "latency_p99_ms": 528.39,
-  "task_time_p50_ms": 10055.07,
-  "task_time_p95_ms": 11394.94,
-  "task_time_p99_ms": 12225.67
+    "cold_read_postgres_p50_ms": 0.21,
+    "cold_read_postgres_p95_ms": 0.34,
+    "cold_read_postgres_p99_ms": 0.65,
+    "cold_read_qdrant_p50_ms": 2.19,
+    "cold_read_qdrant_p95_ms": 3.27,
+    "cold_read_qdrant_p99_ms": 8.3,
+    "cold_read_redis_p50_ms": 0.14,
+    "cold_read_redis_p95_ms": 0.2,
+    "cold_read_redis_p99_ms": 0.36,
+    "fio_cold_read_iops": 216751,
+    "fio_cold_read_latency_us": 1180.658378598,
+    "platform": "nirvana-abs",
+    "timestamp": "2026-04-29T17:13:59.359643"
 }

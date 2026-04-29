@@ -1,0 +1,69 @@
+---
+# FIO cold read benchmark (raw disk IOPS)
+# Writes data, drops OS caches, then reads to measure true disk performance.
+- name: Run fio cold read benchmark
+  hosts: all
+  become: true
+  tasks:
+    - name: Install fio
+      apt:
+        name: fio
+        state: present
+        update_cache: true
+
+    - name: Create benchmark directory
+      file:
+        path: /opt/benchmark-runner
+        state: directory
+        mode: '0755'
+
+    - name: Write test file for cold read
+      shell: |
+        fio --name=write_test \
+            --ioengine=libaio \
+            --direct=1 \
+            --bs=4k \
+            --iodepth=64 \
+            --size=1G \
+            --rw=write \
+            --numjobs=4 \
+            --filename=/opt/benchmark-runner/cold_read_test
+
+    - name: Drop OS caches
+      shell: sync && echo 3 > /proc/sys/vm/drop_caches
+
+    - name: Run fio cold read benchmark
+      shell: |
+        fio --name=cold_read \
+            --ioengine=libaio \
+            --direct=1 \
+            --bs=4k \
+            --iodepth=64 \
+            --size=1G \
+            --rw=read \
+            --numjobs=4 \
+            --runtime=30 \
+            --time_based \
+            --group_reporting \
+            --output-format=json \
+            --filename=/opt/benchmark-runner/cold_read_test
+      register: fio_result
+
+    - name: Parse fio results
+      set_fact:
+        fio_cold_read_iops: "{{ (fio_result.stdout | from_json).jobs[0].read.iops | round(0) }}"
+        fio_cold_read_lat_us: "{{ (fio_result.stdout | from_json).jobs[0].read.lat_ns.mean / 1000 | round(2) }}"
+
+    - name: Display cold read results
+      debug:
+        msg: |
+
+          ========== {{ platform_name | upper }} COLD READ (fio) ==========
+          Cold Read IOPS:     {{ fio_cold_read_iops }}
+          Cold Read Latency:  {{ fio_cold_read_lat_us }} us
+          ================================================
+
+    - name: Cleanup fio test file
+      file:
+        path: /opt/benchmark-runner/cold_read_test
+        state: absent
