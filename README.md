@@ -98,21 +98,19 @@ cd terraform && terraform destroy
 
 ### LangChain Benchmark
 
-| Metric | Nirvana ABS | AWS gp3 | Improvement |
-|--------|-------------|---------|-------------|
-| IOPS | 167.25 | 123.58 | **+35%** |
-| Latency p50 | 108.10 ms | 143.56 ms | **25% lower** |
-| Latency p95 | 256.10 ms | 525.02 ms | **51% lower** |
-| Latency p99 | 545.78 ms | 1,507.94 ms | **64% lower** |
-| Task Time p50 | 9,998 ms | 13,237 ms | **1.3x faster** |
-| Task Time p95 | 11,466 ms | 19,754 ms | **1.7x faster** |
-| Task Time p99 | 12,981 ms | 22,441 ms | **1.7x faster** |
+| Platform | IOPS | Latency p50 | Latency p95 | Latency p99 | Task Time p50 | Task Time p95 | Task Time p99 |
+|----------|------|-------------|-------------|-------------|---------------|---------------|---------------|
+| gp3-3k | 93.78 | 6.14 ms | 24.75 ms | 41.72 ms | 619 ms | 830 ms | 889 ms |
+| gp3-16k | 91.10 | 6.21 ms | 25.61 ms | 42.17 ms | 636 ms | 859 ms | 926 ms |
+| io2-32k | 92.89 | 6.27 ms | 25.04 ms | 40.90 ms | 626 ms | 838 ms | 894 ms |
+| io2-64k | 92.10 | 6.17 ms | 25.08 ms | 42.39 ms | 633 ms | 832 ms | 902 ms |
+| **Nirvana ABS** | **104.29** | **5.33 ms** | **21.34 ms** | **33.53 ms** | **553 ms** | **759 ms** | **799 ms** |
 
 ### Key Takeaways
 
-1. **Nirvana ABS** delivers **217k IOPS** vs AWS's best io2 (40k) = **5.4x faster**
-2. **Tail latency (p99)** shows the biggest improvement - **64% lower** on Nirvana ABS
-3. **Task completion** is **1.7x faster** at p95/p99 - critical for production SLAs
+1. **Raw disk (fio):** Nirvana ABS delivers **217k IOPS** vs AWS's best io2 (40k) = **5.4x faster**
+2. **LangChain latency p99:** Nirvana ABS is **20% lower** than AWS io2-64k (33.5ms vs 42.4ms)
+3. **Task completion p99:** Nirvana ABS is **11% faster** (799ms vs 894ms)
 4. AWS io2-64k was capped by m6i.xlarge instance limit (40k) despite 64k provisioned IOPS
 
 ## Test Configuration
