@@ -240,7 +240,7 @@ resource "nirvana_compute_vm" "benchmark" {
   region            = var.nirvana_region
   project_id        = var.nirvana_project_id
   instance_type     = var.nirvana_instance_type
-  os_image_name     = "ubuntu-noble-2025-10-01"
+  os_image_name     = "ubuntu-noble-2026-05-18"
   boot_volume       = { size = var.nirvana_storage_size, type = var.nirvana_storage_type }
   public_ip_enabled = true
   subnet_id         = nirvana_networking_vpc.benchmark.subnet.id

@@ -1,0 +1,29 @@
+{
+    "cold": {
+        "benchmark_duration_s": 426.99,
+        "iops": 140.52,
+        "latency_p50_ms": 9.18,
+        "latency_p95_ms": 108.87,
+        "latency_p99_ms": 288.61,
+        "postgres_read_p50_ms": 3.08,
+        "postgres_read_p95_ms": 19.73,
+        "postgres_read_p99_ms": 40.01,
+        "qdrant_read_p50_ms": 57.33,
+        "qdrant_read_p95_ms": 234.42,
+        "qdrant_read_p99_ms": 369.94,
+        "redis_read_p50_ms": 4.53,
+        "redis_read_p95_ms": 40.51,
+        "redis_read_p99_ms": 86.75,
+        "task_time_p50_ms": 408.34,
+        "task_time_p95_ms": 586.1,
+        "task_time_p99_ms": 816.02
+    },
+    "fio_iops": 3098,
+    "fio_latency_us": 82625.528091316,
+    "num_agents": 500,
+    "platform": "gp3-3k",
+    "tasks_per_agent": 20,
+    "timestamp": "2026-05-18T04:30:32.368141",
+    "total_operations": 60000,
+    "total_tasks": 10000
+}

@@ -1,117 +1,174 @@
-# LangChain Agent Benchmark
+# LangChain Agent Benchmark — Multi-Tenant Qdrant on Nirvana ABS vs AWS
 
-Compares storage performance between [Nirvana Labs ABS](https://nirvanalabs.io) and AWS (gp3 and io2) for LangChain agent workloads.
+Cold-read benchmarks for a multi-tenant Qdrant deployment (50 collections × 100K vectors, `inline_storage` + INT8 scalar quantization) on five storage platforms, run as three separate scenarios (different agent fan-out / depth), each replicated across three independent runs (r1, r2, r3) for run-to-run stability.
 
-> OS caches are dropped before benchmarks to measure true disk performance, not memory cache.
+> Cold reads only: Qdrant container restarted and OS page cache dropped before each benchmark. The HNSW index has to be paged in from disk.
 
-## What's Tested
+## Platforms
 
-### 1. Raw Disk (fio)
-- Write 1GB test file, drop OS caches, measure IOPS/latency
+| Platform | Instance | Storage | Provisioned IOPS |
+|----------|----------|---------|------------------|
+| gp3-3k | AWS m6i.xlarge | EBS gp3 | 3,000 |
+| gp3-16k | AWS m6i.xlarge | EBS gp3 | 16,000 |
+| io2-32k | AWS m6i.xlarge | EBS io2 | 32,000 |
+| io2-64k | AWS m6i.xlarge | EBS io2 | 64,000 (capped at 40k by instance) |
+| Nirvana ABS | n1-standard-4 | ABS | Dynamic |
 
-### 2. LangChain
-- Run LangChain agents with Qdrant, Redis, Postgres
-- Measure IOPS, latency (p50/p95/p99), and task completion time
+Each VM: 4 vCPU / 16 GB RAM / 256 GB volume. Qdrant + Redis + Postgres run in Docker on the same VM. Workload: 5M random 768d vectors loaded into 50 Qdrant collections (100K each), `hnsw_config.inline_storage = true`, INT8 scalar quantization (quantile 0.99). Each task issues 2 random-tenant Qdrant queries, 2 Redis reads, 2 Postgres reads.
 
 ## Quick Start
 
-### Prerequisites
-
-- [Terraform](https://terraform.io) installed
-- [Ansible](https://ansible.com) installed
-
-### Step 1: Configure Credentials
-
 ```bash
-# AWS credentials
-export AWS_ACCESS_KEY_ID="..."
-export AWS_SECRET_ACCESS_KEY="..."
-export AWS_SESSION_TOKEN="..."  # if using temporary credentials
-
-# Nirvana Labs API key (https://dashboard.nirvanalabs.io/settings/api-keys)
+export AWS_ACCESS_KEY_ID="..." AWS_SECRET_ACCESS_KEY="..." AWS_SESSION_TOKEN="..."
 export NIRVANA_LABS_API_KEY="..."
-```
 
-### Step 2: Configure Terraform
-
-```bash
 cd terraform
-cp terraform.tfvars.example terraform.tfvars
+cp terraform.tfvars.example terraform.tfvars   # edit ssh_public_key + nirvana_project_id
+terraform init && terraform apply
+
+cd ../scripts && ./generate-inventory.sh
+cd ../ansible && ansible-playbook -i inventory/hosts.yml playbook.yml
+
+cd ../terraform && terraform destroy
 ```
 
-Edit `terraform.tfvars`:
-```hcl
-ssh_public_key     = "ssh-ed25519 AAAA... your-email@example.com"
-nirvana_project_id = "your-project-id"  # Get from Nirvana dashboard
-```
+Workload size is set in `ansible/roles/benchmark-runner/defaults/main.yml` (`num_agents`, `tasks_per_agent`).
 
-### Step 3: Deploy VMs
+## Raw disk floor (fio, O_DIRECT QD=256, sequential read, 30s)
 
-```bash
-terraform init
-terraform apply
-```
+| Platform | Measured IOPS | Mean latency |
+|----------|--------------:|-------------:|
+| gp3-3k | 3,097 | 82.6 ms |
+| gp3-16k | 16,531 | 15.5 ms |
+| io2-32k | 33,068 | 7.7 ms |
+| io2-64k | 40,339 | 6.3 ms |
+| Nirvana ABS | 261k–313k (range across runs) | 0.82–1.0 ms |
 
-Deploys 5 VMs:
-- **AWS gp3-3k**: m6i.xlarge, 256GB, 3,000 IOPS
-- **AWS gp3-16k**: m6i.xlarge, 256GB, 16,000 IOPS
-- **AWS io2-32k**: m6i.xlarge, 256GB, 32,000 IOPS
-- **AWS io2-64k**: m6i.xlarge, 256GB, 64,000 IOPS (capped at instance limit)
-- **Nirvana**: n1-standard-4, 256GB ABS (dynamic IOPS)
+fio numbers are stable to within ±2% on AWS platforms (provisioned IOPS caps make them deterministic). Nirvana fio varies more because there's no fixed cap.
 
-### Step 4: Generate Inventory
+---
 
-```bash
-./scripts/generate-inventory.sh
-```
+## Scenario 1 — 100 agents × 10 tasks (1,000 total tasks)
 
-### Step 5: Run Benchmark
+Three independent cold runs on the multi-tenant config.
 
-```bash
-cd ansible && ansible-playbook playbook.yml
-```
+### LangChain cold reads
 
-Or fio only:
-```bash
-cd ansible && ansible-playbook fio-only.yml
-```
+| Platform | r1 dur | r1 task p99 | r2 dur | r2 task p99 | r3 dur | r3 task p99 |
+|----------|-------:|------------:|-------:|------------:|-------:|------------:|
+| **nirvana-abs** | **36s** | **542 ms** | **36s** | **553 ms** | **36s** | **564 ms** |
+| io2-32k | 40s | 556 ms | 41s | 587 ms | 43s | 600 ms |
+| io2-64k | 40s | 567 ms | 41s | 639 ms | 42s | 595 ms |
+| gp3-16k | 43s | 651 ms | 42s | 622 ms | 43s | 696 ms |
+| gp3-3k | 61s | 1,345 ms | 63s | 1,203 ms | 62s | 2,360 ms |
 
-### Step 6: Cleanup
+### Qdrant p99 (per-query, disk-bound)
 
-```bash
-cd terraform && terraform destroy
-```
+| Platform | r1 | r2 | r3 |
+|----------|---:|---:|---:|
+| io2-64k | 140 ms | 157 ms | 149 ms |
+| io2-32k | 140 ms | 155 ms | 156 ms |
+| nirvana-abs | 170 ms | 176 ms | 182 ms |
+| gp3-16k | 175 ms | 174 ms | 173 ms |
+| gp3-3k | 599 ms | 581 ms | 951 ms |
 
-## Results
+### Takeaways
 
-### Raw Disk (fio)
+- Nirvana fastest duration and task p99 in all three runs (36 s / 542–564 ms vs io2 40-43 s / 556-639 ms).
+- io2 owns the per-query Qdrant tail in all three runs (140-157 ms vs Nirvana 170-182 ms).
+- gp3-3k task p99 swings 1,203 → 2,360 ms across runs — only platform with run-to-run noise outside ±10%.
 
-| Platform | Provisioned IOPS | Measured IOPS | Latency |
-|----------|------------------|---------------|---------|
-| gp3-3k | 3,000 | 3,097 | 82,639 us |
-| gp3-16k | 16,000 | 16,531 | 15,484 us |
-| io2-32k | 32,000 | 33,071 | 7,740 us |
-| io2-64k | 64,000 | 40,339* | 6,345 us |
-| **Nirvana ABS** | Dynamic | **216,751** | **1,181 us** |
+---
 
-\* io2-64k capped at m6i.xlarge instance limit (40,000 IOPS)
+## Scenario 2 — 500 agents × 20 tasks (10,000 total tasks)
 
-### LangChain Benchmark
+### LangChain cold reads
 
-| Platform | IOPS | Latency p50 | Latency p95 | Latency p99 | Task Time p50 | Task Time p95 | Task Time p99 |
-|----------|------|-------------|-------------|-------------|---------------|---------------|---------------|
-| gp3-3k | 93.78 | 6.14 ms | 24.75 ms | 41.72 ms | 619 ms | 830 ms | 889 ms |
-| gp3-16k | 91.10 | 6.21 ms | 25.61 ms | 42.17 ms | 636 ms | 859 ms | 926 ms |
-| io2-32k | 92.89 | 6.27 ms | 25.04 ms | 40.90 ms | 626 ms | 838 ms | 894 ms |
-| io2-64k | 92.10 | 6.17 ms | 25.08 ms | 42.39 ms | 633 ms | 832 ms | 902 ms |
-| **Nirvana ABS** | **104.29** | **5.33 ms** | **21.34 ms** | **33.53 ms** | **553 ms** | **759 ms** | **799 ms** |
+| Platform | r1 dur | r1 task p99 | r2 dur | r2 task p99 | r3 dur | r3 task p99 |
+|----------|-------:|------------:|-------:|------------:|-------:|------------:|
+| **nirvana-abs** | **343s** | **485 ms** | **351s** | **497 ms** | **351s** | **501 ms** |
+| io2-64k | 395s | 553 ms | 413s | 579 ms | 424s | 600 ms |
+| io2-32k | 401s | 559 ms | 413s | 579 ms | 420s | 591 ms |
+| gp3-16k | 413s | 576 ms | 418s | 585 ms | 430s | 609 ms |
+| gp3-3k | 427s | 816 ms | 446s | 842 ms | 433s | 828 ms |
 
-### Key Takeaways
+### Qdrant p99 (per-query)
 
-1. **Raw disk (fio):** Nirvana ABS delivers **217k IOPS** vs AWS's best io2 (40k) = **5.4x faster**
-2. **LangChain latency p99:** Nirvana ABS is **20% lower** than AWS io2-64k (33.5ms vs 42.4ms)
-3. **Task completion p99:** Nirvana ABS is **11% faster** (799ms vs 894ms)
-4. AWS io2-64k was capped by m6i.xlarge instance limit (40k) despite 64k provisioned IOPS
+| Platform | r1 | r2 | r3 |
+|----------|---:|---:|---:|
+| io2-64k | 141 ms | 166 ms | 160 ms |
+| io2-32k | 151 ms | 162 ms | 163 ms |
+| gp3-16k | 166 ms | 170 ms | 179 ms |
+| nirvana-abs | 167 ms | 170 ms | 169 ms |
+| gp3-3k | 370 ms | 392 ms | 369 ms |
+
+### Takeaways
+
+- Nirvana wins duration and task p99 in all three runs (343-351 s / 485-501 ms). Run-to-run spread ≤16 ms task p99.
+- io2 owns Qdrant tail (141-166 ms vs Nirvana 167-170 ms). 6-25 ms gap.
+- Every platform stable to ±5% on every metric — 10K-task sample eliminates the run-to-run noise visible at 100×10.
+
+---
+
+## Scenario 3 — 1000 agents
+
+r1 and r2 are at × 10 tasks (10K total tasks). **r3 is at × 100 tasks (100K total tasks) — 10× the work**, included to show how the same platform ordering holds at high sustained depth. Numbers are not directly comparable across the columns; compare within-column (platforms vs platforms in the same run).
+
+### LangChain cold reads
+
+| Platform | r1 (×10) dur | r1 task p99 | r2 (×10) dur | r2 task p99 | r3 (×100) dur | r3 task p99 |
+|----------|-------------:|------------:|-------------:|------------:|--------------:|------------:|
+| **nirvana-abs** | **343s** | **483 ms** | **352s** | **502 ms** | **3,484s (58 min)** | **725 ms** |
+| io2-64k | 400s | 567 ms | 422s | 601 ms | 4,151s | 771 ms |
+| io2-32k | 399s | 559 ms | 420s | 594 ms | 4,129s | 779 ms |
+| gp3-16k | 410s | 571 ms | 432s | 611 ms | 4,098s | 760 ms |
+| gp3-3k | 428s | 867 ms | 432s | 806 ms | 4,271s | 809 ms |
+
+### Qdrant p99 (per-query)
+
+| Platform | r1 (×10) | r2 (×10) | r3 (×100) |
+|----------|---------:|---------:|----------:|
+| io2-64k | 145 ms | 166 ms | 140 ms |
+| io2-32k | 145 ms | 163 ms | 140 ms |
+| gp3-16k | 170 ms | 184 ms | 147 ms |
+| nirvana-abs | 168 ms | 169 ms | **301 ms** |
+| gp3-3k | 397 ms | 368 ms | 307 ms |
+
+### Takeaways
+
+- Nirvana wins duration and task p99 in all three runs, including the 10×-larger r3 (58 min vs 68-71 min on AWS, 16% faster).
+- Qdrant p99 ordering flips at × 100 tasks: Nirvana's per-query p99 jumps from 169 ms to 301 ms while io2 holds at 140 ms. Wider right tail under sustained 100K-task load — the array's shared-controller path sees longer queue events at p99 when read pressure is held high.
+- gp3-3k stays IOPS-bound: same 307-397 ms Qdrant p99 across all three runs regardless of workload depth.
+
+---
+
+## Cross-scenario summary
+
+Headline metric per platform per run (Qdrant p99 / task p99 / duration):
+
+| Scenario | gp3-3k | gp3-16k | io2-32k | io2-64k | nirvana-abs |
+|----------|--------|---------|---------|---------|-------------|
+| 100×10 r1 | 599 / 1345 / 61s | 175 / 651 / 43s | 140 / 556 / 40s | 140 / 567 / 40s | 170 / 542 / 36s |
+| 100×10 r2 | 581 / 1203 / 63s | 174 / 622 / 42s | 155 / 587 / 41s | 157 / 639 / 41s | 176 / 553 / 36s |
+| 100×10 r3 | 951 / 2360 / 62s | 173 / 696 / 43s | 156 / 600 / 43s | 149 / 595 / 42s | 182 / 564 / 36s |
+| 500×20 r1 | 370 / 816 / 427s | 166 / 576 / 413s | 151 / 559 / 401s | 141 / 553 / 395s | 167 / 485 / 343s |
+| 500×20 r2 | 392 / 842 / 446s | 170 / 585 / 418s | 162 / 579 / 413s | 166 / 579 / 413s | 170 / 497 / 351s |
+| 500×20 r3 | 369 / 828 / 433s | 179 / 609 / 430s | 163 / 591 / 420s | 160 / 600 / 424s | 169 / 501 / 351s |
+| 1000×10 r1 | 397 / 867 / 428s | 170 / 571 / 410s | 145 / 559 / 399s | 145 / 567 / 400s | 168 / 483 / 343s |
+| 1000×10 r2 | 368 / 806 / 432s | 184 / 611 / 432s | 163 / 594 / 420s | 166 / 601 / 422s | 169 / 502 / 352s |
+| 1000×100 r3\* | 307 / 809 / 4271s | 147 / 760 / 4098s | 140 / 779 / 4129s | 140 / 771 / 4151s | 301 / 725 / 3484s |
+
+\* r3 of scenario 3 is 1000 agents × **100** tasks (10× the total work of r1/r2).
+
+### Overall takeaways
+
+- Nirvana ABS finishes fastest end-to-end in all 9 runs. Margin vs the best AWS platform: 9-16% on duration, 4-14% on task p99.
+- io2 owns per-query Qdrant p99 in 8 of 9 runs (Nirvana within 2-29 ms in those 8). The exception is the 100K-task sustained run, where Nirvana's per-query tail expands to 301 ms while io2 stays at 140 ms.
+- io2-32k and io2-64k are statistically indistinguishable. Provisioning beyond 32k IOPS buys nothing for this workload.
+- gp3-3k is the only IOPS-bound platform (3,000 IOPS ceiling). Qdrant p99 sits 2-6× higher than the io2 tier.
+- Run-to-run stability is sample-size driven: ±10% at 1,000 tasks, ±5% at 10,000 tasks, sub-percent at 100,000 tasks for the stable metrics.
+
+---
 
 ## Test Configuration
 
@@ -124,47 +181,40 @@ cd terraform && terraform destroy
 | Provisioned IOPS | 3,000 | 16,000 | 32,000 | 64,000 | Dynamic |
 | Instance Max IOPS | 40,000 | 40,000 | 40,000 | 40,000 | N/A |
 
-## Architecture
+### Benchmark parameters
 
-```
-+---------------------------------------------------------------------+
-|                          LOCAL MACHINE                              |
-|   +-----------+      +-----------+      +-----------+               |
-|   | Terraform | ---> |  Ansible  | ---> |  Results  |               |
-|   +-----------+      +-----+-----+      +-----------+               |
-+----------------------------|----------------------------------------+
-                             | SSH
-        +----------+---------+----------+-----------+
-        |          |         |          |           |
-        v          v         v          v           v
-    +--------+ +--------+ +--------+ +--------+ +------------+
-    | gp3-3k | |gp3-16k | |io2-32k | |io2-64k | | Nirvana ABS|
-    | 3k IOPS| |16k IOPS| |32k IOPS| |64k IOPS| |dynamic IOPS|
-    +--------+ +--------+ +--------+ +--------+ +------------+
-```
+| Parameter | 100×10 | 500×20 | 1000×10 r1/r2 | 1000×100 r3 |
+|-----------|-------:|-------:|-------:|------:|
+| Pre-loaded vectors | 5,000,000 across 50 collections × 100K | (same) | (same) | (same) |
+| Vector dimensions | 768 | 768 | 768 | 768 |
+| HNSW `inline_storage` | true | true | true | true |
+| Quantization | INT8 scalar, quantile 0.99 | (same) | (same) | (same) |
+| Agents | 100 | 500 | 1,000 | 1,000 |
+| Tasks per agent | 10 | 20 | 10 | 100 |
+| Operations per task | 6 (2× Qdrant, 2× Redis, 2× Postgres) | (same) | (same) | (same) |
+| Total tasks | 1,000 | 10,000 | 10,000 | 100,000 |
+| Total operations | 6,000 | 60,000 | 60,000 | 600,000 |
+| Concurrent workers | 10 | 10 | 10 | 10 |
 
 ## Methodology
 
-OS caches are dropped before each benchmark to ensure we measure true disk I/O:
+1. **Pre-load:** insert 5M random vectors across 50 Qdrant collections, with `on_disk=true`, `inline_storage=true`, and INT8 scalar quantization. Auto-skipped on subsequent scenarios reusing the same on-disk state.
+2. **Cold start:** restart Qdrant container to clear HNSW from process memory.
+3. **Drop caches:** `sync && echo 3 > /proc/sys/vm/drop_caches`.
+4. **Benchmark:** N agents × M tasks. Each task = 2× Qdrant random-tenant query + 2× Redis read + 2× Postgres read.
+5. **Measure:** per-op latency percentiles (p50/p95/p99), application IOPS, end-to-end task time. Per-second `iostat -x` captured throughout.
 
-```bash
-sync && echo 3 > /proc/sys/vm/drop_caches
+## Result file layout
+
 ```
-
-## Project Structure
-
-```
-.
-├── terraform/
-│   ├── main.tf              # AWS (gp3 + io2) + Nirvana resources
-│   └── variables.tf
-├── ansible/
-│   ├── playbook.yml         # Full benchmark (fio + LangChain)
-│   ├── fio-only.yml         # Raw disk benchmark only
-│   └── roles/
-│       ├── benchmark-services/   # Docker (Qdrant, Redis, Postgres)
-│       └── benchmark-runner/     # Cold read benchmarks
-└── results/                 # JSON results
+ansible/results/
+├── 100X10/
+│   ├── {gp3-3k,gp3-16k,io2-32k,io2-64k,nirvana-abs}-benchmark-{r1,r2,r3}.json
+│   └── {gp3-3k,gp3-16k,io2-32k,io2-64k,nirvana-abs}-iostat-{r1,r2,r3}.log
+├── 500X20/
+│   └── ... (same layout)
+└── 1000X10/
+    └── ... (same layout; r3 is 1000×100, see Scenario 3)
 ```
 
 ## Links

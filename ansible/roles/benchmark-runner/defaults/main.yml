@@ -1,2 +1,10 @@
 ---
 # Platform name set via inventory (aws-gp3 or nirvana-abs)
+
+# Benchmark modes - set to false to skip
+run_cold: true
+run_hot: false
+
+# Agent workload shape
+num_agents: 1000
+tasks_per_agent: 10
