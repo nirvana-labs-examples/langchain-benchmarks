@@ -1,16 +1,18 @@
 ---
 # =============================================================================
-# COLD READ BENCHMARK
-# All tests drop OS caches before reading to measure true disk performance.
+# BENCHMARK RUNNER
+# - fio: cold reads only
+# - LangChain: cold and/or hot reads (controlled by run_cold, run_hot vars)
 # =============================================================================
 
-- name: Install Python, pip, and fio
+- name: Install Python, pip, fio, and sysstat
   apt:
     name:
       - python3
       - python3-pip
       - python3-venv
       - fio
+      - sysstat
     state: present
     update_cache: true
 
@@ -21,10 +23,10 @@
     mode: '0755'
 
 # =============================================================================
-# RAW DISK COLD READ (fio)
+# RAW DISK BENCHMARK (fio) - COLD ONLY
 # =============================================================================
 
-- name: Write test file for cold read
+- name: Write test file for fio
   shell: |
     fio --name=write_test \
         --ioengine=libaio \
@@ -34,10 +36,12 @@
         --size=1G \
         --rw=write \
         --numjobs=4 \
-        --filename=/opt/benchmark-runner/cold_read_test
+        --filename=/opt/benchmark-runner/fio_test
+  when: not (skip_fio | default(false) | bool)
 
-- name: Drop OS caches
+- name: Drop OS caches for cold read
   shell: sync && echo 3 > /proc/sys/vm/drop_caches
+  when: not (skip_fio | default(false) | bool)
 
 - name: Run fio cold read benchmark
   shell: |
@@ -53,30 +57,40 @@
         --time_based \
         --group_reporting \
         --output-format=json \
-        --filename=/opt/benchmark-runner/cold_read_test
+        --filename=/opt/benchmark-runner/fio_test
   register: fio_result
+  when: not (skip_fio | default(false) | bool)
 
 - name: Parse fio results
   set_fact:
-    fio_cold_read_iops: "{{ (fio_result.stdout | from_json).jobs[0].read.iops | round(0) }}"
-    fio_cold_read_lat_us: "{{ (fio_result.stdout | from_json).jobs[0].read.lat_ns.mean / 1000 | round(2) }}"
+    fio_iops: "{{ (fio_result.stdout | from_json).jobs[0].read.iops | round(0) }}"
+    fio_lat_us: "{{ (fio_result.stdout | from_json).jobs[0].read.lat_ns.mean / 1000 | round(2) }}"
+  when: not (skip_fio | default(false) | bool)
 
-- name: Display fio cold read results
+- name: Set dummy fio results when skipped
+  set_fact:
+    fio_iops: 0
+    fio_lat_us: 0
+  when: skip_fio | default(false) | bool
+
+- name: Display fio results
   debug:
     msg: |
 
       ========== {{ platform_name | upper }} RAW DISK (fio) ==========
-      Cold Read IOPS:     {{ fio_cold_read_iops }}
-      Cold Read Latency:  {{ fio_cold_read_lat_us }} us
+      Cold Read IOPS:     {{ fio_iops }}
+      Cold Read Latency:  {{ fio_lat_us }} us
       ================================================
+  when: not (skip_fio | default(false) | bool)
 
 - name: Cleanup fio test file
   file:
-    path: /opt/benchmark-runner/cold_read_test
+    path: /opt/benchmark-runner/fio_test
     state: absent
+  when: not (skip_fio | default(false) | bool)
 
 # =============================================================================
-# LANGCHAIN BENCHMARK
+# LANGCHAIN BENCHMARK SETUP
 # =============================================================================
 
 - name: Copy benchmark script
@@ -96,24 +110,216 @@
       - psycopg2-binary
       - redis
       - qdrant-client
-      - sentence-transformers
       - numpy
     virtualenv: /opt/benchmark-runner/venv
 
-- name: Run LangChain benchmark
-  command: /opt/benchmark-runner/venv/bin/python /opt/benchmark-runner/benchmark.py
+# =============================================================================
+# LANGCHAIN COLD READ BENCHMARK (True Cold HNSW)
+# =============================================================================
+
+# First ensure 5M vectors are preloaded
+- name: Run preload phase (5M vectors into Qdrant)
+  command: /opt/benchmark-runner/venv/bin/python /opt/benchmark-runner/benchmark.py --preload-only
   args:
     chdir: /opt/benchmark-runner
-  register: benchmark_result
-  async: 1800
-  poll: 30
+  async: 7200
+  poll: 60
+  when: run_cold | bool
 
-- name: Combine results
+# Restart Qdrant to clear HNSW index from memory (TRUE COLD HNSW)
+- name: Restart Qdrant container (clear HNSW from memory)
+  shell: cd /opt/benchmark && docker-compose restart qdrant
+  when: run_cold | bool
+
+- name: Wait for Qdrant to be ready
+  wait_for:
+    port: 6333
+    host: localhost
+    delay: 5
+    timeout: 120
+  when: run_cold | bool
+
+- name: Drop OS caches before cold benchmark
+  shell: sync && echo 3 > /proc/sys/vm/drop_caches
+  when: run_cold | bool
+
+- name: Start iostat monitoring in background
+  shell: nohup iostat -x 1 > /opt/benchmark-runner/iostat.log 2>&1 &
+  when: run_cold | bool
+
+- name: Run LangChain COLD benchmark (true cold HNSW)
+  command: /opt/benchmark-runner/venv/bin/python /opt/benchmark-runner/benchmark.py --mode cold --skip-preload
+  args:
+    chdir: /opt/benchmark-runner
+  register: benchmark_cold_result
+  async: 7200
+  poll: 60
+  when: run_cold | bool
+
+- name: Parse cold benchmark results
   set_fact:
-    combined_results: "{{ (benchmark_result.stdout | from_json) | combine({
-      'fio_iops': fio_cold_read_iops | int,
-      'fio_latency_us': fio_cold_read_lat_us | float
-    }) }}"
+    cold_results: "{{ benchmark_cold_result.stdout | from_json }}"
+  when: run_cold | bool
+
+- name: Stop iostat monitoring
+  shell: killall iostat || true
+  ignore_errors: true
+  when: run_cold | bool
+
+- name: Get iostat summary (last 10 samples)
+  shell: tail -100 /opt/benchmark-runner/iostat.log | grep -A1 "Device" | grep -v "^--$" | tail -20
+  register: iostat_summary
+  when: run_cold | bool
+  ignore_errors: true
+
+- name: Display iostat disk utilization
+  debug:
+    msg: |
+
+      ========== {{ platform_name | upper }} DISK I/O (iostat) ==========
+      {{ iostat_summary.stdout }}
+      ================================================
+  when: run_cold | bool and iostat_summary.stdout is defined
+
+- name: Fetch iostat log to local
+  fetch:
+    src: /opt/benchmark-runner/iostat.log
+    dest: "results/{{ platform_name }}-iostat.log"
+    flat: yes
+  when: run_cold | bool
+
+# =============================================================================
+# LANGCHAIN HOT READ BENCHMARK
+# =============================================================================
+
+- name: Run LangChain HOT benchmark
+  command: /opt/benchmark-runner/venv/bin/python /opt/benchmark-runner/benchmark.py --mode hot
+  args:
+    chdir: /opt/benchmark-runner
+  register: benchmark_hot_result
+  async: 7200
+  poll: 60
+  when: run_hot | bool
+
+- name: Parse hot benchmark results
+  set_fact:
+    hot_results: "{{ benchmark_hot_result.stdout | from_json }}"
+  when: run_hot | bool
+
+# =============================================================================
+# COMBINE AND SAVE RESULTS
+# =============================================================================
+
+- name: Combine results (both modes)
+  set_fact:
+    combined_results:
+      platform: "{{ platform_name }}"
+      timestamp: "{{ cold_results.timestamp }}"
+      num_agents: "{{ cold_results.num_agents }}"
+      tasks_per_agent: "{{ cold_results.tasks_per_agent }}"
+      total_operations: "{{ cold_results.total_operations }}"
+      total_tasks: "{{ cold_results.total_tasks }}"
+      fio_iops: "{{ fio_iops | int }}"
+      fio_latency_us: "{{ fio_lat_us | float }}"
+      cold:
+        benchmark_duration_s: "{{ cold_results.benchmark_duration_s }}"
+        iops: "{{ cold_results.iops }}"
+        latency_p50_ms: "{{ cold_results.latency_p50_ms }}"
+        latency_p95_ms: "{{ cold_results.latency_p95_ms }}"
+        latency_p99_ms: "{{ cold_results.latency_p99_ms }}"
+        qdrant_read_p50_ms: "{{ cold_results.qdrant_read_p50_ms }}"
+        qdrant_read_p95_ms: "{{ cold_results.qdrant_read_p95_ms }}"
+        qdrant_read_p99_ms: "{{ cold_results.qdrant_read_p99_ms }}"
+        redis_read_p50_ms: "{{ cold_results.redis_read_p50_ms }}"
+        redis_read_p95_ms: "{{ cold_results.redis_read_p95_ms }}"
+        redis_read_p99_ms: "{{ cold_results.redis_read_p99_ms }}"
+        postgres_read_p50_ms: "{{ cold_results.postgres_read_p50_ms }}"
+        postgres_read_p95_ms: "{{ cold_results.postgres_read_p95_ms }}"
+        postgres_read_p99_ms: "{{ cold_results.postgres_read_p99_ms }}"
+        task_time_p50_ms: "{{ cold_results.task_time_p50_ms }}"
+        task_time_p95_ms: "{{ cold_results.task_time_p95_ms }}"
+        task_time_p99_ms: "{{ cold_results.task_time_p99_ms }}"
+      hot:
+        benchmark_duration_s: "{{ hot_results.benchmark_duration_s }}"
+        iops: "{{ hot_results.iops }}"
+        latency_p50_ms: "{{ hot_results.latency_p50_ms }}"
+        latency_p95_ms: "{{ hot_results.latency_p95_ms }}"
+        latency_p99_ms: "{{ hot_results.latency_p99_ms }}"
+        qdrant_read_p50_ms: "{{ hot_results.qdrant_read_p50_ms }}"
+        qdrant_read_p95_ms: "{{ hot_results.qdrant_read_p95_ms }}"
+        qdrant_read_p99_ms: "{{ hot_results.qdrant_read_p99_ms }}"
+        redis_read_p50_ms: "{{ hot_results.redis_read_p50_ms }}"
+        redis_read_p95_ms: "{{ hot_results.redis_read_p95_ms }}"
+        redis_read_p99_ms: "{{ hot_results.redis_read_p99_ms }}"
+        postgres_read_p50_ms: "{{ hot_results.postgres_read_p50_ms }}"
+        postgres_read_p95_ms: "{{ hot_results.postgres_read_p95_ms }}"
+        postgres_read_p99_ms: "{{ hot_results.postgres_read_p99_ms }}"
+        task_time_p50_ms: "{{ hot_results.task_time_p50_ms }}"
+        task_time_p95_ms: "{{ hot_results.task_time_p95_ms }}"
+        task_time_p99_ms: "{{ hot_results.task_time_p99_ms }}"
+  when: run_cold | bool and run_hot | bool
+
+- name: Combine results (cold only)
+  set_fact:
+    combined_results:
+      platform: "{{ platform_name }}"
+      timestamp: "{{ cold_results.timestamp }}"
+      num_agents: "{{ cold_results.num_agents }}"
+      tasks_per_agent: "{{ cold_results.tasks_per_agent }}"
+      total_operations: "{{ cold_results.total_operations }}"
+      total_tasks: "{{ cold_results.total_tasks }}"
+      fio_iops: "{{ fio_iops | int }}"
+      fio_latency_us: "{{ fio_lat_us | float }}"
+      cold:
+        benchmark_duration_s: "{{ cold_results.benchmark_duration_s }}"
+        iops: "{{ cold_results.iops }}"
+        latency_p50_ms: "{{ cold_results.latency_p50_ms }}"
+        latency_p95_ms: "{{ cold_results.latency_p95_ms }}"
+        latency_p99_ms: "{{ cold_results.latency_p99_ms }}"
+        qdrant_read_p50_ms: "{{ cold_results.qdrant_read_p50_ms }}"
+        qdrant_read_p95_ms: "{{ cold_results.qdrant_read_p95_ms }}"
+        qdrant_read_p99_ms: "{{ cold_results.qdrant_read_p99_ms }}"
+        redis_read_p50_ms: "{{ cold_results.redis_read_p50_ms }}"
+        redis_read_p95_ms: "{{ cold_results.redis_read_p95_ms }}"
+        redis_read_p99_ms: "{{ cold_results.redis_read_p99_ms }}"
+        postgres_read_p50_ms: "{{ cold_results.postgres_read_p50_ms }}"
+        postgres_read_p95_ms: "{{ cold_results.postgres_read_p95_ms }}"
+        postgres_read_p99_ms: "{{ cold_results.postgres_read_p99_ms }}"
+        task_time_p50_ms: "{{ cold_results.task_time_p50_ms }}"
+        task_time_p95_ms: "{{ cold_results.task_time_p95_ms }}"
+        task_time_p99_ms: "{{ cold_results.task_time_p99_ms }}"
+  when: run_cold | bool and not (run_hot | bool)
+
+- name: Combine results (hot only)
+  set_fact:
+    combined_results:
+      platform: "{{ platform_name }}"
+      timestamp: "{{ hot_results.timestamp }}"
+      num_agents: "{{ hot_results.num_agents }}"
+      tasks_per_agent: "{{ hot_results.tasks_per_agent }}"
+      total_operations: "{{ hot_results.total_operations }}"
+      total_tasks: "{{ hot_results.total_tasks }}"
+      fio_iops: "{{ fio_iops | int }}"
+      fio_latency_us: "{{ fio_lat_us | float }}"
+      hot:
+        benchmark_duration_s: "{{ hot_results.benchmark_duration_s }}"
+        iops: "{{ hot_results.iops }}"
+        latency_p50_ms: "{{ hot_results.latency_p50_ms }}"
+        latency_p95_ms: "{{ hot_results.latency_p95_ms }}"
+        latency_p99_ms: "{{ hot_results.latency_p99_ms }}"
+        qdrant_read_p50_ms: "{{ hot_results.qdrant_read_p50_ms }}"
+        qdrant_read_p95_ms: "{{ hot_results.qdrant_read_p95_ms }}"
+        qdrant_read_p99_ms: "{{ hot_results.qdrant_read_p99_ms }}"
+        redis_read_p50_ms: "{{ hot_results.redis_read_p50_ms }}"
+        redis_read_p95_ms: "{{ hot_results.redis_read_p95_ms }}"
+        redis_read_p99_ms: "{{ hot_results.redis_read_p99_ms }}"
+        postgres_read_p50_ms: "{{ hot_results.postgres_read_p50_ms }}"
+        postgres_read_p95_ms: "{{ hot_results.postgres_read_p95_ms }}"
+        postgres_read_p99_ms: "{{ hot_results.postgres_read_p99_ms }}"
+        task_time_p50_ms: "{{ hot_results.task_time_p50_ms }}"
+        task_time_p95_ms: "{{ hot_results.task_time_p95_ms }}"
+        task_time_p99_ms: "{{ hot_results.task_time_p99_ms }}"
+  when: run_hot | bool and not (run_cold | bool)
 
 - name: Save results to file
   copy:
@@ -126,22 +332,78 @@
     dest: "results/{{ platform_name }}-benchmark.json"
     flat: yes
 
-- name: Display results
+- name: Display results (both modes)
   debug:
     msg: |
 
       ========== {{ platform_name | upper }} BENCHMARK RESULTS ==========
 
-      RAW DISK (fio):
-        IOPS:     {{ fio_cold_read_iops }}
-        Latency:  {{ fio_cold_read_lat_us }} us
+      RAW DISK (fio - cold):
+        IOPS:     {{ fio_iops }}
+        Latency:  {{ fio_lat_us }} us
 
-      LANGCHAIN:
-        IOPS:           {{ combined_results.iops }}
-        Latency p50:    {{ combined_results.latency_p50_ms }} ms
-        Latency p95:    {{ combined_results.latency_p95_ms }} ms
-        Latency p99:    {{ combined_results.latency_p99_ms }} ms
-        Task Time p50:  {{ combined_results.task_time_p50_ms }} ms
-        Task Time p95:  {{ combined_results.task_time_p95_ms }} ms
-        Task Time p99:  {{ combined_results.task_time_p99_ms }} ms
+      LANGCHAIN COLD READS:
+        IOPS:           {{ cold_results.iops }}
+        Latency p50:    {{ cold_results.latency_p50_ms }} ms
+        Latency p95:    {{ cold_results.latency_p95_ms }} ms
+        Latency p99:    {{ cold_results.latency_p99_ms }} ms
+        Qdrant p99:     {{ cold_results.qdrant_read_p99_ms }} ms
+        Redis p99:      {{ cold_results.redis_read_p99_ms }} ms
+        Postgres p99:   {{ cold_results.postgres_read_p99_ms }} ms
+        Task Time p99:  {{ cold_results.task_time_p99_ms }} ms
+
+      LANGCHAIN HOT READS:
+        IOPS:           {{ hot_results.iops }}
+        Latency p50:    {{ hot_results.latency_p50_ms }} ms
+        Latency p95:    {{ hot_results.latency_p95_ms }} ms
+        Latency p99:    {{ hot_results.latency_p99_ms }} ms
+        Qdrant p99:     {{ hot_results.qdrant_read_p99_ms }} ms
+        Redis p99:      {{ hot_results.redis_read_p99_ms }} ms
+        Postgres p99:   {{ hot_results.postgres_read_p99_ms }} ms
+        Task Time p99:  {{ hot_results.task_time_p99_ms }} ms
       ================================================
+  when: run_cold | bool and run_hot | bool
+
+- name: Display results (cold only)
+  debug:
+    msg: |
+
+      ========== {{ platform_name | upper }} BENCHMARK RESULTS ==========
+
+      RAW DISK (fio - cold):
+        IOPS:     {{ fio_iops }}
+        Latency:  {{ fio_lat_us }} us
+
+      LANGCHAIN COLD READS:
+        IOPS:           {{ cold_results.iops }}
+        Latency p50:    {{ cold_results.latency_p50_ms }} ms
+        Latency p95:    {{ cold_results.latency_p95_ms }} ms
+        Latency p99:    {{ cold_results.latency_p99_ms }} ms
+        Qdrant p99:     {{ cold_results.qdrant_read_p99_ms }} ms
+        Redis p99:      {{ cold_results.redis_read_p99_ms }} ms
+        Postgres p99:   {{ cold_results.postgres_read_p99_ms }} ms
+        Task Time p99:  {{ cold_results.task_time_p99_ms }} ms
+      ================================================
+  when: run_cold | bool and not (run_hot | bool)
+
+- name: Display results (hot only)
+  debug:
+    msg: |
+
+      ========== {{ platform_name | upper }} BENCHMARK RESULTS ==========
+
+      RAW DISK (fio - cold):
+        IOPS:     {{ fio_iops }}
+        Latency:  {{ fio_lat_us }} us
+
+      LANGCHAIN HOT READS:
+        IOPS:           {{ hot_results.iops }}
+        Latency p50:    {{ hot_results.latency_p50_ms }} ms
+        Latency p95:    {{ hot_results.latency_p95_ms }} ms
+        Latency p99:    {{ hot_results.latency_p99_ms }} ms
+        Qdrant p99:     {{ hot_results.qdrant_read_p99_ms }} ms
+        Redis p99:      {{ hot_results.redis_read_p99_ms }} ms
+        Postgres p99:   {{ hot_results.postgres_read_p99_ms }} ms
+        Task Time p99:  {{ hot_results.task_time_p99_ms }} ms
+      ================================================
+  when: run_hot | bool and not (run_cold | bool)

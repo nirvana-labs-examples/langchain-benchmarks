@@ -1,33 +1,43 @@
 #!/usr/bin/env python3
 """
 LangChain benchmark measuring IOPS, latency, and task time.
-Proper cold read order: populate data → drop caches → read only.
+Pre-loads 5M vectors (768d) to force disk I/O - won't fit in 16GB RAM.
+Supports both cold reads (drop caches) and hot reads (cached).
 """
 
 import json
 import time
 import sys
 import subprocess
+import argparse
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import numpy as np
 import psycopg2
 import redis
 from qdrant_client import QdrantClient
-from qdrant_client.models import VectorParams, Distance, PointStruct
-from sentence_transformers import SentenceTransformer
+from qdrant_client.models import (
+    VectorParams, Distance, PointStruct,
+    HnswConfigDiff, ScalarQuantization, ScalarQuantizationConfig, ScalarType,
+)
 
 PLATFORM = "{{ platform_name }}"
-NUM_AGENTS = 100
-TASKS_PER_AGENT = 10
-EMBEDDING_DIM = 384
+NUM_AGENTS = {{ num_agents }}
+TASKS_PER_AGENT = {{ tasks_per_agent }}
+EMBEDDING_DIM = 768
+PRELOAD_VECTORS = 5_000_000  # 5M vectors @ 768d float32 = ~15GB raw + HNSW index
+NUM_COLLECTIONS = 50  # Multi-tenant: split 5M across N collections (each = independent HNSW)
+VECTORS_PER_COLLECTION = PRELOAD_VECTORS // NUM_COLLECTIONS
+COLLECTION_NAMES = [f"documents_{i}" for i in range(NUM_COLLECTIONS)]
 
 
 class BenchmarkRunner:
     def __init__(self):
-        self.embedder = SentenceTransformer('all-MiniLM-L6-v2')
         self.operation_latencies = []
         self.task_times = []
+        self.qdrant_latencies = []
+        self.redis_latencies = []
+        self.postgres_latencies = []
 
     def setup(self):
         """Initialize databases"""
@@ -42,28 +52,61 @@ class BenchmarkRunner:
         conn.close()
 
         client = QdrantClient(host="localhost", port=6333)
-        try:
-            client.delete_collection("documents")
-        except:
-            pass
-        client.create_collection("documents", vectors_config=VectorParams(size=EMBEDDING_DIM, distance=Distance.COSINE))
+        # Multi-tenant: create N independent collections (each = one tenant)
+        for name in COLLECTION_NAMES:
+            try:
+                client.delete_collection(name)
+            except:
+                pass
+            client.create_collection(
+                name,
+                vectors_config=VectorParams(size=EMBEDDING_DIM, distance=Distance.COSINE, on_disk=True),
+                hnsw_config=HnswConfigDiff(on_disk=True, inline_storage=True),
+                quantization_config=ScalarQuantization(
+                    scalar=ScalarQuantizationConfig(type=ScalarType.INT8, always_ram=False, quantile=0.99)
+                ),
+            )
+        print(f"Created {NUM_COLLECTIONS} collections ({VECTORS_PER_COLLECTION:,} vectors each)", file=sys.stderr, flush=True)
+
+    def preload_vectors(self):
+        """Pre-load PRELOAD_VECTORS across NUM_COLLECTIONS collections"""
+        print(f"Pre-loading {PRELOAD_VECTORS:,} vectors ({EMBEDDING_DIM}d) across {NUM_COLLECTIONS} collections...", file=sys.stderr, flush=True)
+        client = QdrantClient(host="localhost", port=6333, timeout=300)
+
+        batch_size = 1000
+        batches_per_collection = VECTORS_PER_COLLECTION // batch_size
+        total_batches = NUM_COLLECTIONS * batches_per_collection
+        batch_count = 0
+
+        for coll_idx, coll_name in enumerate(COLLECTION_NAMES):
+            for batch_num in range(batches_per_collection):
+                start_id = batch_num * batch_size
+                vectors = np.random.rand(batch_size, EMBEDDING_DIM).astype(np.float32)
+                points = [
+                    PointStruct(
+                        id=start_id + i,
+                        vector=vectors[i].tolist(),
+                        payload={"batch": batch_num, "idx": i}
+                    )
+                    for i in range(batch_size)
+                ]
+                client.upsert(coll_name, points, wait=True)
+                batch_count += 1
+                if batch_count % 100 == 0:
+                    progress = batch_count / total_batches * 100
+                    print(f"  Progress: {batch_count}/{total_batches} batches ({progress:.1f}%) - coll {coll_idx+1}/{NUM_COLLECTIONS}", file=sys.stderr, flush=True)
+
+        total = sum(client.get_collection(c).points_count for c in COLLECTION_NAMES)
+        print(f"Pre-load complete: {total:,} vectors across {NUM_COLLECTIONS} collections", file=sys.stderr, flush=True)
 
     def populate_data(self, agent_id: int):
-        """Write all data for an agent (Phase 1: writes only)"""
-        qdrant = QdrantClient(host="localhost", port=6333)
+        """Write agent data to Redis and Postgres"""
         redis_client = redis.Redis(host="localhost", port=6379, db=0)
         pg_conn = psycopg2.connect(host="localhost", database="benchmark", user="benchmark", password="benchmark")
         pg_cur = pg_conn.cursor()
 
         try:
             for task_id in range(TASKS_PER_AGENT):
-                # Vector writes
-                docs = [f"Document {i} for agent {agent_id} task {task_id}" for i in range(5)]
-                embeddings = self.embedder.encode(docs)
-                points = [PointStruct(id=agent_id*10000+task_id*100+i, vector=emb.tolist(), payload={"text": doc, "agent_id": agent_id})
-                         for i, (doc, emb) in enumerate(zip(docs, embeddings))]
-                qdrant.upsert("documents", points)
-
                 # Redis writes
                 redis_client.setex(f"agent:{agent_id}:task:{task_id}", 3600, json.dumps({"status": "done", "data": f"result-{task_id}"}))
 
@@ -82,73 +125,155 @@ class BenchmarkRunner:
         subprocess.run(["sh", "-c", "echo 3 > /proc/sys/vm/drop_caches"], check=True)
         time.sleep(2)
 
-    def run_read_task(self, agent_id: int, task_id: int):
-        """Run read-only operations for cold read benchmark (Phase 3: reads only)"""
-        task_start = time.time()
-        task_latencies = []
+    def cold_warmup_qdrant(self):
+        """Readiness check after cold boot - queries first collection to verify Qdrant is up"""
+        print("Checking Qdrant readiness after restart...", file=sys.stderr, flush=True)
+        qdrant = QdrantClient(host="localhost", port=6333, timeout=600)
+        query_vec = np.random.rand(EMBEDDING_DIM).astype(np.float32).tolist()
 
-        qdrant = QdrantClient(host="localhost", port=6333)
+        max_retries = 10
+        for attempt in range(max_retries):
+            try:
+                start = time.time()
+                qdrant.query_points(COLLECTION_NAMES[0], query=query_vec, limit=10)
+                elapsed = time.time() - start
+                print(f"Qdrant ready (warmup query on {COLLECTION_NAMES[0]} took {elapsed:.1f}s)", file=sys.stderr, flush=True)
+                return
+            except Exception as e:
+                print(f"Attempt {attempt + 1}/{max_retries}: waiting for HNSW index... ({str(e)[:50]})", file=sys.stderr, flush=True)
+                time.sleep(10)  # Wait before retry
+
+        raise Exception("Failed to load HNSW index after max retries")
+
+    def warmup_caches(self):
+        """Warm up caches by reading sample data"""
+        print("Warming up caches (partial - data too large for full warmup)...", file=sys.stderr, flush=True)
+        qdrant = QdrantClient(host="localhost", port=6333, timeout=300)
+        redis_client = redis.Redis(host="localhost", port=6379, db=0)
+        pg_conn = psycopg2.connect(host="localhost", database="benchmark", user="benchmark", password="benchmark")
+        pg_cur = pg_conn.cursor()
+
+        # Warm up with sample queries (rotate across collections)
+        for i in range(100):
+            query_vec = np.random.rand(EMBEDDING_DIM).astype(np.float32).tolist()
+            qdrant.query_points(COLLECTION_NAMES[i % NUM_COLLECTIONS], query=query_vec, limit=10)
+
+        # Redis warmup
+        for agent_id in range(NUM_AGENTS):
+            for task_id in range(TASKS_PER_AGENT):
+                redis_client.get(f"agent:{agent_id}:task:{task_id}")
+
+        # Postgres warmup
+        for agent_id in range(NUM_AGENTS):
+            pg_cur.execute("SELECT * FROM checkpoints WHERE agent_id = %s", (str(agent_id),))
+            pg_cur.fetchall()
+
+        pg_cur.close()
+        pg_conn.close()
+        print("Cache warmup complete.", file=sys.stderr, flush=True)
+
+    def qdrant_query_with_retry(self, qdrant, query_vec, collection, limit=10, max_retries=3):
+        """Query Qdrant with retry on timeout"""
+        for attempt in range(max_retries):
+            try:
+                start = time.time()
+                qdrant.query_points(collection, query=query_vec, limit=limit)
+                return (time.time() - start) * 1000
+            except Exception as e:
+                if attempt < max_retries - 1:
+                    time.sleep(1)
+                    continue
+                return 60000  # 60s timeout marker
+
+    def run_read_task(self, agent_id: int, task_id: int):
+        """Run read-only operations - vector searches will hit disk"""
+        task_start = time.time()
+        qdrant_lats = []
+        redis_lats = []
+        postgres_lats = []
+
+        qdrant = QdrantClient(host="localhost", port=6333, timeout=300)
         redis_client = redis.Redis(host="localhost", port=6379, db=0)
         pg_conn = psycopg2.connect(host="localhost", database="benchmark", user="benchmark", password="benchmark")
         pg_cur = pg_conn.cursor()
 
         try:
-            # 1. Vector search (RAG retrieval)
-            query = f"Agent {agent_id} task {task_id} query"
-            query_emb = self.embedder.encode([query])[0]
-            start = time.time()
-            qdrant.query_points("documents", query=query_emb.tolist(), limit=10)
-            task_latencies.append((time.time() - start) * 1000)
+            # 1. Vector search - random tenant (multi-tenant: each query may hit a different collection)
+            query_vec = np.random.rand(EMBEDDING_DIM).astype(np.float32).tolist()
+            coll = COLLECTION_NAMES[np.random.randint(NUM_COLLECTIONS)]
+            qdrant_lats.append(self.qdrant_query_with_retry(qdrant, query_vec, coll, limit=10))
 
             # 2. Cache read
             start = time.time()
             redis_client.get(f"agent:{agent_id}:task:{task_id}")
-            task_latencies.append((time.time() - start) * 1000)
+            redis_lats.append((time.time() - start) * 1000)
 
             # 3. Checkpoint read
             start = time.time()
             pg_cur.execute("SELECT * FROM checkpoints WHERE agent_id = %s ORDER BY created_at DESC LIMIT 5", (str(agent_id),))
             pg_cur.fetchall()
-            task_latencies.append((time.time() - start) * 1000)
+            postgres_lats.append((time.time() - start) * 1000)
 
-            # 4. Another vector search
-            query2 = f"Search results for agent {agent_id}"
-            query_emb2 = self.embedder.encode([query2])[0]
-            start = time.time()
-            qdrant.query_points("documents", query=query_emb2.tolist(), limit=5)
-            task_latencies.append((time.time() - start) * 1000)
+            # 4. Another vector search - random tenant
+            query_vec2 = np.random.rand(EMBEDDING_DIM).astype(np.float32).tolist()
+            coll2 = COLLECTION_NAMES[np.random.randint(NUM_COLLECTIONS)]
+            qdrant_lats.append(self.qdrant_query_with_retry(qdrant, query_vec2, coll2, limit=5))
 
             # 5. Another cache read
             start = time.time()
             redis_client.get(f"agent:{agent_id}:task:{(task_id + 1) % TASKS_PER_AGENT}")
-            task_latencies.append((time.time() - start) * 1000)
+            redis_lats.append((time.time() - start) * 1000)
 
             # 6. Another checkpoint read
             start = time.time()
             pg_cur.execute("SELECT state FROM checkpoints WHERE agent_id = %s AND task_id = %s", (str(agent_id), str(task_id)))
             pg_cur.fetchall()
-            task_latencies.append((time.time() - start) * 1000)
+            postgres_lats.append((time.time() - start) * 1000)
 
         finally:
             pg_cur.close()
             pg_conn.close()
 
         task_time = (time.time() - task_start) * 1000
-        return task_latencies, task_time
+        return qdrant_lats, redis_lats, postgres_lats, task_time
 
-    def run_benchmark(self):
-        self.setup()
+    def run_benchmark(self, mode="cold", skip_preload=False):
+        # Auto-detect if vectors already exist (sum across all collections)
+        client = QdrantClient(host="localhost", port=6333, timeout=60)
+        existing_vectors = 0
+        try:
+            for name in COLLECTION_NAMES:
+                existing_vectors += client.get_collection(name).points_count
+        except:
+            existing_vectors = 0
 
-        # Phase 1: Populate data (writes)
-        print(f"Phase 1: Populating data for {NUM_AGENTS} agents...", file=sys.stderr, flush=True)
+        if skip_preload or existing_vectors >= PRELOAD_VECTORS:
+            print(f"Skipping preload - found {existing_vectors:,} existing vectors", file=sys.stderr, flush=True)
+            preload_duration = 0
+        else:
+            self.setup()
+            # Phase 0: Pre-load 5M vectors
+            preload_start = time.time()
+            self.preload_vectors()
+            preload_duration = time.time() - preload_start
+            print(f"Pre-load took {preload_duration:.1f}s", file=sys.stderr, flush=True)
+
+        # Phase 1: Populate agent data (Redis + Postgres only, vectors already loaded)
+        print(f"Phase 1: Populating agent data for {NUM_AGENTS} agents...", file=sys.stderr, flush=True)
         with ThreadPoolExecutor(max_workers=10) as executor:
             list(executor.map(self.populate_data, range(NUM_AGENTS)))
 
-        # Phase 2: Drop caches
-        self.drop_os_caches()
+        # Phase 2: Prepare caches based on mode
+        if mode == "cold":
+            self.drop_os_caches()
+            # Note: Qdrant internal cache stays warm from preload/previous queries
+            # Only OS page cache is dropped - this matches original benchmark behavior
+        else:  # hot
+            self.warmup_caches()
 
-        # Phase 3: Cold reads
-        print(f"Phase 3: Running cold reads ({NUM_AGENTS} agents x {TASKS_PER_AGENT} tasks)...", file=sys.stderr, flush=True)
+        # Phase 3: Run reads (vector searches will now hit disk!)
+        read_type = "cold" if mode == "cold" else "hot"
+        print(f"Phase 3: Running {read_type} reads ({NUM_AGENTS} agents x {TASKS_PER_AGENT} tasks)...", file=sys.stderr, flush=True)
         benchmark_start = time.time()
         total_operations = 0
 
@@ -159,29 +284,74 @@ class BenchmarkRunner:
                     futures.append(executor.submit(self.run_read_task, agent_id, task_id))
 
             for future in as_completed(futures):
-                latencies, task_time = future.result()
-                self.operation_latencies.extend(latencies)
+                qdrant_lats, redis_lats, postgres_lats, task_time = future.result()
+                self.qdrant_latencies.extend(qdrant_lats)
+                self.redis_latencies.extend(redis_lats)
+                self.postgres_latencies.extend(postgres_lats)
+                self.operation_latencies.extend(qdrant_lats + redis_lats + postgres_lats)
                 self.task_times.append(task_time)
-                total_operations += len(latencies)
+                total_operations += len(qdrant_lats) + len(redis_lats) + len(postgres_lats)
 
         benchmark_duration = time.time() - benchmark_start
         iops = total_operations / benchmark_duration
 
         return {
             "platform": PLATFORM,
+            "mode": mode,
             "timestamp": datetime.now().isoformat(),
+            "num_agents": NUM_AGENTS,
+            "tasks_per_agent": TASKS_PER_AGENT,
+            "preload_vectors": PRELOAD_VECTORS,
+            "preload_duration_s": round(preload_duration, 2),
+            "total_operations": total_operations,
+            "total_tasks": len(self.task_times),
+            "benchmark_duration_s": round(benchmark_duration, 2),
             "iops": round(iops, 2),
             "latency_p50_ms": round(np.percentile(self.operation_latencies, 50), 2),
             "latency_p95_ms": round(np.percentile(self.operation_latencies, 95), 2),
             "latency_p99_ms": round(np.percentile(self.operation_latencies, 99), 2),
+            "qdrant_read_p50_ms": round(np.percentile(self.qdrant_latencies, 50), 2),
+            "qdrant_read_p95_ms": round(np.percentile(self.qdrant_latencies, 95), 2),
+            "qdrant_read_p99_ms": round(np.percentile(self.qdrant_latencies, 99), 2),
+            "redis_read_p50_ms": round(np.percentile(self.redis_latencies, 50), 2),
+            "redis_read_p95_ms": round(np.percentile(self.redis_latencies, 95), 2),
+            "redis_read_p99_ms": round(np.percentile(self.redis_latencies, 99), 2),
+            "postgres_read_p50_ms": round(np.percentile(self.postgres_latencies, 50), 2),
+            "postgres_read_p95_ms": round(np.percentile(self.postgres_latencies, 95), 2),
+            "postgres_read_p99_ms": round(np.percentile(self.postgres_latencies, 99), 2),
             "task_time_p50_ms": round(np.percentile(self.task_times, 50), 2),
             "task_time_p95_ms": round(np.percentile(self.task_times, 95), 2),
             "task_time_p99_ms": round(np.percentile(self.task_times, 99), 2),
-            "total_operations": total_operations,
-            "total_tasks": len(self.task_times),
-            "benchmark_duration_s": round(benchmark_duration, 2),
         }
 
 
 if __name__ == "__main__":
-    print(json.dumps(BenchmarkRunner().run_benchmark(), indent=2))
+    parser = argparse.ArgumentParser(description="LangChain benchmark")
+    parser.add_argument("--mode", choices=["cold", "hot"], default="cold",
+                        help="Benchmark mode: cold (drop caches) or hot (cached)")
+    parser.add_argument("--skip-preload", action="store_true",
+                        help="Skip vector preload (use existing data)")
+    parser.add_argument("--preload-only", action="store_true",
+                        help="Only preload vectors, don't run benchmark")
+    args = parser.parse_args()
+
+    runner = BenchmarkRunner()
+
+    if args.preload_only:
+        # Only preload vectors, then exit (sum across collections)
+        client = QdrantClient(host="localhost", port=6333, timeout=60)
+        existing_vectors = 0
+        try:
+            for name in COLLECTION_NAMES:
+                existing_vectors += client.get_collection(name).points_count
+        except:
+            existing_vectors = 0
+
+        if existing_vectors >= PRELOAD_VECTORS:
+            print(f"Preload skipped - found {existing_vectors:,} existing vectors", file=sys.stderr, flush=True)
+        else:
+            runner.setup()
+            runner.preload_vectors()
+        print(json.dumps({"status": "preload_complete", "vectors": PRELOAD_VECTORS}))
+    else:
+        print(json.dumps(runner.run_benchmark(mode=args.mode, skip_preload=args.skip_preload), indent=2))
