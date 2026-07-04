@@ -30,6 +30,15 @@
     dest: /opt/benchmark/docker-compose.yml
     mode: '0644'
 
+# compose 1.29.2 cannot recreate running containers whose config changed
+# ('ContainerConfig' KeyError vs newer Docker engines); tear down first.
+# Named volumes (postgres/qdrant/redis data) survive a down, and starting
+# from stopped services gives every benchmark run identical conditions.
+- name: Stop existing services
+  command: docker-compose down --remove-orphans
+  args:
+    chdir: /opt/benchmark
+
 - name: Start services
   command: docker-compose up -d
   args:
