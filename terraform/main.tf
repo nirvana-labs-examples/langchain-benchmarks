@@ -133,6 +133,12 @@ resource "aws_instance" "gp3_3k" {
     throughput  = 125
   }
 
+    # VMs stay on the AMI they were created with; a newer upstream AMI must not
+  # force replacement (it would destroy the preloaded benchmark volumes)
+  lifecycle {
+    ignore_changes = [ami]
+  }
+
   tags = { Name = "langchain-bench-gp3-3k" }
 }
 
@@ -149,6 +155,12 @@ resource "aws_instance" "gp3_16k" {
     volume_type = "gp3"
     iops        = 16000
     throughput  = 1000
+  }
+
+    # VMs stay on the AMI they were created with; a newer upstream AMI must not
+  # force replacement (it would destroy the preloaded benchmark volumes)
+  lifecycle {
+    ignore_changes = [ami]
   }
 
   tags = { Name = "langchain-bench-gp3-16k" }
@@ -168,6 +180,12 @@ resource "aws_instance" "io2_32k" {
     iops        = 32000
   }
 
+    # VMs stay on the AMI they were created with; a newer upstream AMI must not
+  # force replacement (it would destroy the preloaded benchmark volumes)
+  lifecycle {
+    ignore_changes = [ami]
+  }
+
   tags = { Name = "langchain-bench-io2-32k" }
 }
 
@@ -183,6 +201,12 @@ resource "aws_instance" "io2_64k" {
     volume_size = var.aws_storage_size
     volume_type = "io2"
     iops        = 64000
+  }
+
+    # VMs stay on the AMI they were created with; a newer upstream AMI must not
+  # force replacement (it would destroy the preloaded benchmark volumes)
+  lifecycle {
+    ignore_changes = [ami]
   }
 
   tags = { Name = "langchain-bench-io2-64k" }
