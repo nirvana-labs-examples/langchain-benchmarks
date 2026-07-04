@@ -221,6 +221,12 @@ resource "nirvana_networking_vpc" "benchmark" {
   region      = var.nirvana_region
   project_id  = var.nirvana_project_id
   subnet_name = "langchain-benchmark-subnet"
+
+  # Provider 1.52 reports tags [] -> null on resources created by older versions;
+  # that cosmetic diff must not cascade into replacing the running VM
+  lifecycle {
+    ignore_changes = [tags]
+  }
 }
 
 resource "nirvana_networking_firewall_rule" "ssh" {
@@ -230,6 +236,12 @@ resource "nirvana_networking_firewall_rule" "ssh" {
   source_address      = "0.0.0.0/0"
   destination_address = nirvana_networking_vpc.benchmark.subnet.cidr
   destination_ports   = ["22"]
+
+  # Provider 1.52 reports tags [] -> null on resources created by older versions;
+  # that cosmetic diff must not cascade into replacing the running VM
+  lifecycle {
+    ignore_changes = [tags]
+  }
 }
 
 resource "nirvana_networking_firewall_rule" "postgres" {
@@ -239,6 +251,12 @@ resource "nirvana_networking_firewall_rule" "postgres" {
   source_address      = "0.0.0.0/0"
   destination_address = nirvana_networking_vpc.benchmark.subnet.cidr
   destination_ports   = ["5432"]
+
+  # Provider 1.52 reports tags [] -> null on resources created by older versions;
+  # that cosmetic diff must not cascade into replacing the running VM
+  lifecycle {
+    ignore_changes = [tags]
+  }
 }
 
 resource "nirvana_networking_firewall_rule" "qdrant" {
@@ -248,6 +266,12 @@ resource "nirvana_networking_firewall_rule" "qdrant" {
   source_address      = "0.0.0.0/0"
   destination_address = nirvana_networking_vpc.benchmark.subnet.cidr
   destination_ports   = ["6333", "6334"]
+
+  # Provider 1.52 reports tags [] -> null on resources created by older versions;
+  # that cosmetic diff must not cascade into replacing the running VM
+  lifecycle {
+    ignore_changes = [tags]
+  }
 }
 
 resource "nirvana_networking_firewall_rule" "redis" {
@@ -257,6 +281,12 @@ resource "nirvana_networking_firewall_rule" "redis" {
   source_address      = "0.0.0.0/0"
   destination_address = nirvana_networking_vpc.benchmark.subnet.cidr
   destination_ports   = ["6379"]
+
+  # Provider 1.52 reports tags [] -> null on resources created by older versions;
+  # that cosmetic diff must not cascade into replacing the running VM
+  lifecycle {
+    ignore_changes = [tags]
+  }
 }
 
 resource "nirvana_compute_vm" "benchmark" {
@@ -276,6 +306,12 @@ resource "nirvana_compute_vm" "benchmark" {
     nirvana_networking_firewall_rule.qdrant,
     nirvana_networking_firewall_rule.redis
   ]
+
+  # Provider 1.52 reports tags [] -> null on resources created by older versions;
+  # that cosmetic diff must not cascade into replacing the running VM
+  lifecycle {
+    ignore_changes = [tags]
+  }
 }
 
 # =============================================================================
