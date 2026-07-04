@@ -1,0 +1,126 @@
+{
+    "benchmark_duration_s": 41.65,
+    "checkpoint_base_kb": 2,
+    "checkpoint_growth_kb": 2,
+    "checkpoint_max_kb": 64,
+    "fio_fsync_lat_us": 992.16,
+    "fio_write_iops": 33052,
+    "fio_write_lat_us": 7744.38,
+    "iops": 144.04,
+    "mode": "mixed",
+    "num_agents": 100,
+    "platform": "io2-32k",
+    "postgres_commit_p50_ms": 8.43,
+    "postgres_commit_p95_ms": 31.86,
+    "postgres_commit_p99_ms": 50.56,
+    "postgres_read_p50_ms": 5.61,
+    "postgres_read_p95_ms": 25.0,
+    "postgres_read_p99_ms": 39.5,
+    "qdrant_read_p50_ms": 84.68,
+    "qdrant_read_p95_ms": 134.16,
+    "qdrant_read_p99_ms": 157.81,
+    "qdrant_upsert_p50_ms": 41.24,
+    "qdrant_upsert_p95_ms": 89.13,
+    "qdrant_upsert_p99_ms": 120.75,
+    "redis_read_p50_ms": 32.21,
+    "redis_read_p95_ms": 100.78,
+    "redis_read_p99_ms": 137.52,
+    "redis_write_p50_ms": 6.81,
+    "redis_write_p95_ms": 36.28,
+    "redis_write_p99_ms": 58.93,
+    "task_time_p50_ms": 407.31,
+    "task_time_p95_ms": 525.2,
+    "task_time_p99_ms": 572.83,
+    "tasks_per_agent": 10,
+    "timeseries": {
+        "postgres_commit_p99": [
+            {
+                "ops": 228,
+                "p99_ms": 48.99,
+                "window_start_s": 0
+            },
+            {
+                "ops": 241,
+                "p99_ms": 44.18,
+                "window_start_s": 10
+            },
+            {
+                "ops": 247,
+                "p99_ms": 50.31,
+                "window_start_s": 20
+            },
+            {
+                "ops": 239,
+                "p99_ms": 53.19,
+                "window_start_s": 30
+            },
+            {
+                "ops": 45,
+                "p99_ms": 26.57,
+                "window_start_s": 40
+            }
+        ],
+        "qdrant_upsert_p99": [
+            {
+                "ops": 228,
+                "p99_ms": 112.53,
+                "window_start_s": 0
+            },
+            {
+                "ops": 241,
+                "p99_ms": 110.13,
+                "window_start_s": 10
+            },
+            {
+                "ops": 247,
+                "p99_ms": 141.8,
+                "window_start_s": 20
+            },
+            {
+                "ops": 239,
+                "p99_ms": 133.15,
+                "window_start_s": 30
+            },
+            {
+                "ops": 45,
+                "p99_ms": 99.73,
+                "window_start_s": 40
+            }
+        ],
+        "task_time_p99": [
+            {
+                "ops": 228,
+                "p99_ms": 577.68,
+                "window_start_s": 0
+            },
+            {
+                "ops": 241,
+                "p99_ms": 575.67,
+                "window_start_s": 10
+            },
+            {
+                "ops": 247,
+                "p99_ms": 565.97,
+                "window_start_s": 20
+            },
+            {
+                "ops": 239,
+                "p99_ms": 561.62,
+                "window_start_s": 30
+            },
+            {
+                "ops": 45,
+                "p99_ms": 527.22,
+                "window_start_s": 40
+            }
+        ],
+        "window_s": 10
+    },
+    "timestamp": "2026-07-04T22:52:49.265027",
+    "total_operations": 6000,
+    "total_tasks": 1000,
+    "upsert_batch": 5,
+    "write_latency_p50_ms": 14.62,
+    "write_latency_p95_ms": 68.1,
+    "write_latency_p99_ms": 102.53
+}

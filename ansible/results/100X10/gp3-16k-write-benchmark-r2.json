@@ -1,0 +1,102 @@
+{
+    "benchmark_duration_s": 39.03,
+    "checkpoint_base_kb": 2,
+    "checkpoint_growth_kb": 2,
+    "checkpoint_max_kb": 64,
+    "fio_fsync_lat_us": 2726.95,
+    "fio_write_iops": 16507,
+    "fio_write_lat_us": 15506.45,
+    "iops": 76.86,
+    "mode": "write",
+    "num_agents": 100,
+    "platform": "gp3-16k",
+    "postgres_commit_p50_ms": 12.21,
+    "postgres_commit_p95_ms": 36.65,
+    "postgres_commit_p99_ms": 65.34,
+    "qdrant_upsert_p50_ms": 56.24,
+    "qdrant_upsert_p95_ms": 123.29,
+    "qdrant_upsert_p99_ms": 150.85,
+    "redis_write_p50_ms": 42.26,
+    "redis_write_p95_ms": 114.82,
+    "redis_write_p99_ms": 159.35,
+    "task_time_p50_ms": 378.38,
+    "task_time_p95_ms": 518.71,
+    "task_time_p99_ms": 569.72,
+    "tasks_per_agent": 10,
+    "timeseries": {
+        "postgres_commit_p99": [
+            {
+                "ops": 253,
+                "p99_ms": 69.32,
+                "window_start_s": 0
+            },
+            {
+                "ops": 254,
+                "p99_ms": 69.53,
+                "window_start_s": 10
+            },
+            {
+                "ops": 257,
+                "p99_ms": 41.03,
+                "window_start_s": 20
+            },
+            {
+                "ops": 236,
+                "p99_ms": 62.15,
+                "window_start_s": 30
+            }
+        ],
+        "qdrant_upsert_p99": [
+            {
+                "ops": 253,
+                "p99_ms": 146.03,
+                "window_start_s": 0
+            },
+            {
+                "ops": 254,
+                "p99_ms": 144.91,
+                "window_start_s": 10
+            },
+            {
+                "ops": 257,
+                "p99_ms": 159.06,
+                "window_start_s": 20
+            },
+            {
+                "ops": 236,
+                "p99_ms": 144.31,
+                "window_start_s": 30
+            }
+        ],
+        "task_time_p99": [
+            {
+                "ops": 253,
+                "p99_ms": 572.0,
+                "window_start_s": 0
+            },
+            {
+                "ops": 254,
+                "p99_ms": 573.99,
+                "window_start_s": 10
+            },
+            {
+                "ops": 257,
+                "p99_ms": 559.56,
+                "window_start_s": 20
+            },
+            {
+                "ops": 236,
+                "p99_ms": 571.03,
+                "window_start_s": 30
+            }
+        ],
+        "window_s": 10
+    },
+    "timestamp": "2026-07-04T22:51:36.511169",
+    "total_operations": 3000,
+    "total_tasks": 1000,
+    "upsert_batch": 5,
+    "write_latency_p50_ms": 34.83,
+    "write_latency_p95_ms": 110.82,
+    "write_latency_p99_ms": 146.27
+}
