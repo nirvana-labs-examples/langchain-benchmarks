@@ -2,9 +2,11 @@
 # Platform name set via inventory (aws-gp3 or nirvana-abs)
 
 # Benchmark modes - set to false to skip
-run_cold: true
+run_cold: false
 run_hot: false
+run_write: true
+run_mixed: true
 
-# Agent workload shape
-num_agents: 1000
-tasks_per_agent: 10
+# Agent workload shape (500x20 = preview scenario for the write suite)
+num_agents: 500
+tasks_per_agent: 20

@@ -325,12 +325,14 @@
   copy:
     content: "{{ combined_results | to_nice_json }}"
     dest: /opt/benchmark-runner/results.json
+  when: (run_cold | bool) or (run_hot | bool)
 
 - name: Fetch results to local
   fetch:
     src: /opt/benchmark-runner/results.json
     dest: "results/{{ platform_name }}-benchmark.json"
     flat: yes
+  when: (run_cold | bool) or (run_hot | bool)
 
 - name: Display results (both modes)
   debug:
@@ -407,3 +409,11 @@
         Task Time p99:  {{ hot_results.task_time_p99_ms }} ms
       ================================================
   when: run_hot | bool and not (run_cold | bool)
+
+# =============================================================================
+# STATE-SERIALIZATION WRITE BENCHMARK (see write-benchmark.yml)
+# =============================================================================
+
+- name: Run state-serialization write benchmarks
+  include_tasks: write-benchmark.yml
+  when: (run_write | default(false) | bool) or (run_mixed | default(false) | bool)

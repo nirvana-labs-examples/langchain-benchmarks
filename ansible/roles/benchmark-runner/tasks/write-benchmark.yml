@@ -1,0 +1,204 @@
+---
+# =============================================================================
+# STATE-SERIALIZATION WRITE BENCHMARK
+# - fio write floor: random write throughput + fsync commit latency
+# - write mode: pure checkpoint writes (Postgres commit + Redis + Qdrant upsert)
+# - mixed mode: context reads + checkpoint writes per task
+# =============================================================================
+
+- name: Run fio random write benchmark
+  shell: |
+    fio --name=rand_write \
+        --ioengine=libaio \
+        --direct=1 \
+        --bs=4k \
+        --iodepth=64 \
+        --size=1G \
+        --rw=randwrite \
+        --numjobs=4 \
+        --runtime=30 \
+        --time_based \
+        --group_reporting \
+        --output-format=json \
+        --filename=/opt/benchmark-runner/fio_write_test
+  register: fio_write_result
+  when: not (skip_fio | default(false) | bool)
+
+- name: Run fio fsync latency benchmark (QD=1, fsync per write)
+  shell: |
+    fio --name=fsync_write \
+        --ioengine=libaio \
+        --direct=1 \
+        --bs=4k \
+        --iodepth=1 \
+        --numjobs=1 \
+        --size=256M \
+        --rw=write \
+        --fsync=1 \
+        --runtime=30 \
+        --time_based \
+        --output-format=json \
+        --filename=/opt/benchmark-runner/fio_fsync_test
+  register: fio_fsync_result
+  when: not (skip_fio | default(false) | bool)
+
+- name: Parse fio write results
+  set_fact:
+    fio_write_iops: "{{ ((fio_write_result.stdout | from_json).jobs[0].write.iops) | round(0) }}"
+    fio_write_lat_us: "{{ (((fio_write_result.stdout | from_json).jobs[0].write.lat_ns.mean) / 1000) | round(2) }}"
+    fio_fsync_lat_us: "{{ (((fio_fsync_result.stdout | from_json).jobs[0].sync.lat_ns.mean | default(0)) / 1000) | round(2) }}"
+  when: not (skip_fio | default(false) | bool)
+
+- name: Set dummy fio write results when skipped
+  set_fact:
+    fio_write_iops: 0
+    fio_write_lat_us: 0
+    fio_fsync_lat_us: 0
+  when: skip_fio | default(false) | bool
+
+- name: Display fio write results
+  debug:
+    msg: |
+
+      ========== {{ platform_name | upper }} RAW DISK WRITES (fio) ==========
+      Random Write IOPS:  {{ fio_write_iops }}
+      Write Latency:      {{ fio_write_lat_us }} us
+      Fsync Latency:      {{ fio_fsync_lat_us }} us
+      ================================================
+  when: not (skip_fio | default(false) | bool)
+
+- name: Cleanup fio write test files
+  file:
+    path: "/opt/benchmark-runner/{{ item }}"
+    state: absent
+  loop:
+    - fio_write_test
+    - fio_fsync_test
+  when: not (skip_fio | default(false) | bool)
+
+# =============================================================================
+# DATASET PRELOAD (writes land on filled collections; mixed mode reads need it)
+# =============================================================================
+
+- name: Ensure 5M vectors are preloaded
+  command: /opt/benchmark-runner/venv/bin/python /opt/benchmark-runner/benchmark.py --preload-only
+  args:
+    chdir: /opt/benchmark-runner
+  async: 7200
+  poll: 60
+
+- name: Let Qdrant optimizer settle after preload
+  pause:
+    seconds: 60
+
+# =============================================================================
+# WRITE MODE - pure state-serialization writes
+# =============================================================================
+
+- name: Run write benchmark
+  when: run_write | default(false) | bool
+  block:
+    - name: Start iostat monitoring (write)
+      shell: nohup iostat -x 1 > /opt/benchmark-runner/iostat-write.log 2>&1 &
+
+    - name: Run LangChain WRITE benchmark (state serialization)
+      command: /opt/benchmark-runner/venv/bin/python /opt/benchmark-runner/benchmark.py --mode write --skip-preload
+      args:
+        chdir: /opt/benchmark-runner
+      register: benchmark_write_result
+      async: 14400
+      poll: 60
+
+    - name: Stop iostat monitoring (write)
+      shell: killall iostat || true
+      ignore_errors: true
+
+    - name: Parse write benchmark results
+      set_fact:
+        write_results: "{{ benchmark_write_result.stdout | from_json }}"
+
+    - name: Save write results with fio write floor
+      copy:
+        content: "{{ (write_results | combine({'fio_write_iops': fio_write_iops | int, 'fio_write_lat_us': fio_write_lat_us | float, 'fio_fsync_lat_us': fio_fsync_lat_us | float})) | to_nice_json }}"
+        dest: /opt/benchmark-runner/write-results.json
+
+    - name: Fetch write results to local
+      fetch:
+        src: /opt/benchmark-runner/write-results.json
+        dest: "results/{{ platform_name }}-write-benchmark.json"
+        flat: yes
+
+    - name: Fetch write iostat log to local
+      fetch:
+        src: /opt/benchmark-runner/iostat-write.log
+        dest: "results/{{ platform_name }}-iostat-write.log"
+        flat: yes
+
+    - name: Display write results
+      debug:
+        msg: |
+
+          ========== {{ platform_name | upper }} WRITE BENCHMARK ==========
+          fio write IOPS:       {{ fio_write_iops }}
+          fio fsync latency:    {{ fio_fsync_lat_us }} us
+          Duration:             {{ write_results.benchmark_duration_s }} s
+          Postgres commit p99:  {{ write_results.postgres_commit_p99_ms }} ms
+          Redis write p99:      {{ write_results.redis_write_p99_ms }} ms
+          Qdrant upsert p99:    {{ write_results.qdrant_upsert_p99_ms }} ms
+          Task time p99:        {{ write_results.task_time_p99_ms }} ms
+          ================================================
+
+# =============================================================================
+# MIXED MODE - context reads + checkpoint writes per task
+# =============================================================================
+
+- name: Run mixed benchmark
+  when: run_mixed | default(false) | bool
+  block:
+    - name: Start iostat monitoring (mixed)
+      shell: nohup iostat -x 1 > /opt/benchmark-runner/iostat-mixed.log 2>&1 &
+
+    - name: Run LangChain MIXED benchmark (reads + writes)
+      command: /opt/benchmark-runner/venv/bin/python /opt/benchmark-runner/benchmark.py --mode mixed --skip-preload
+      args:
+        chdir: /opt/benchmark-runner
+      register: benchmark_mixed_result
+      async: 14400
+      poll: 60
+
+    - name: Stop iostat monitoring (mixed)
+      shell: killall iostat || true
+      ignore_errors: true
+
+    - name: Parse mixed benchmark results
+      set_fact:
+        mixed_results: "{{ benchmark_mixed_result.stdout | from_json }}"
+
+    - name: Save mixed results with fio write floor
+      copy:
+        content: "{{ (mixed_results | combine({'fio_write_iops': fio_write_iops | int, 'fio_write_lat_us': fio_write_lat_us | float, 'fio_fsync_lat_us': fio_fsync_lat_us | float})) | to_nice_json }}"
+        dest: /opt/benchmark-runner/mixed-results.json
+
+    - name: Fetch mixed results to local
+      fetch:
+        src: /opt/benchmark-runner/mixed-results.json
+        dest: "results/{{ platform_name }}-mixed-benchmark.json"
+        flat: yes
+
+    - name: Fetch mixed iostat log to local
+      fetch:
+        src: /opt/benchmark-runner/iostat-mixed.log
+        dest: "results/{{ platform_name }}-iostat-mixed.log"
+        flat: yes
+
+    - name: Display mixed results
+      debug:
+        msg: |
+
+          ========== {{ platform_name | upper }} MIXED BENCHMARK ==========
+          Duration:             {{ mixed_results.benchmark_duration_s }} s
+          Postgres commit p99:  {{ mixed_results.postgres_commit_p99_ms }} ms
+          Qdrant upsert p99:    {{ mixed_results.qdrant_upsert_p99_ms }} ms
+          Qdrant read p99:      {{ mixed_results.qdrant_read_p99_ms }} ms
+          Task time p99:        {{ mixed_results.task_time_p99_ms }} ms
+          ================================================

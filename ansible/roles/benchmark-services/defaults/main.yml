@@ -1,0 +1,5 @@
+---
+# Redis AOF fsync policy for the write benchmark:
+#   everysec - default; Redis writes are memory-speed, fsync batched once per second
+#   always   - fsync every write; makes Redis writes fully disk-bound
+redis_appendfsync: everysec

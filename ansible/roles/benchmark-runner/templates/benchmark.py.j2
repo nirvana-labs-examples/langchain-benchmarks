@@ -30,6 +30,13 @@ NUM_COLLECTIONS = 50  # Multi-tenant: split 5M across N collections (each = inde
 VECTORS_PER_COLLECTION = PRELOAD_VECTORS // NUM_COLLECTIONS
 COLLECTION_NAMES = [f"documents_{i}" for i in range(NUM_COLLECTIONS)]
 
+# State-serialization write workload
+CHECKPOINT_BASE_KB = 2     # step-0 checkpoint payload
+CHECKPOINT_GROWTH_KB = 2   # history accumulated per step
+CHECKPOINT_MAX_KB = 64
+UPSERT_BATCH = 5           # vectors written per checkpoint (agent memory)
+TIMESERIES_WINDOW_S = 10   # bucket width for p99-over-time series
+
 
 class BenchmarkRunner:
     def __init__(self):
@@ -38,6 +45,13 @@ class BenchmarkRunner:
         self.qdrant_latencies = []
         self.redis_latencies = []
         self.postgres_latencies = []
+        # Write-mode samples stored as (seconds_since_benchmark_start, latency_ms)
+        # so per-window percentiles can be computed after the run
+        self.pg_commit_samples = []
+        self.redis_write_samples = []
+        self.qdrant_upsert_samples = []
+        self.write_task_samples = []
+        self.benchmark_start = None
 
     def setup(self):
         """Initialize databases"""
@@ -237,6 +251,204 @@ class BenchmarkRunner:
         task_time = (time.time() - task_start) * 1000
         return qdrant_lats, redis_lats, postgres_lats, task_time
 
+    def ensure_pg_schema(self):
+        """Create checkpoints table if missing and truncate so each write run starts clean"""
+        conn = psycopg2.connect(host="localhost", database="benchmark", user="benchmark", password="benchmark")
+        cur = conn.cursor()
+        cur.execute("""CREATE TABLE IF NOT EXISTS checkpoints (
+            id SERIAL PRIMARY KEY, agent_id TEXT, task_id TEXT, state JSONB, created_at TIMESTAMP DEFAULT NOW())""")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_agent_id ON checkpoints(agent_id)")
+        cur.execute("TRUNCATE checkpoints")
+        conn.commit()
+        cur.close()
+        conn.close()
+
+    def build_checkpoint_state(self, agent_id, step):
+        """Serialized agent state; payload grows with step number like accumulating message history"""
+        size_kb = min(CHECKPOINT_BASE_KB + CHECKPOINT_GROWTH_KB * step, CHECKPOINT_MAX_KB)
+        history = "m" * (size_kb * 1024)
+        return json.dumps({"agent_id": agent_id, "step": step, "history": history, "status": "running"})
+
+    def qdrant_upsert_with_retry(self, qdrant, collection, points, max_retries=3):
+        """Upsert to Qdrant with retry on timeout"""
+        for attempt in range(max_retries):
+            try:
+                start = time.time()
+                qdrant.upsert(collection, points, wait=True)
+                return (time.time() - start) * 1000
+            except Exception:
+                if attempt < max_retries - 1:
+                    time.sleep(1)
+                    continue
+                return 60000  # 60s timeout marker
+
+    def run_write_task(self, agent_id: int, task_id: int, mixed: bool = False):
+        """One checkpoint cycle: (optional context reads) + Postgres commit + Redis pointer + Qdrant memory upsert"""
+        task_start = time.time()
+        read_lats = {"qdrant": [], "redis": [], "postgres": []}
+
+        qdrant = QdrantClient(host="localhost", port=6333, timeout=300)
+        redis_client = redis.Redis(host="localhost", port=6379, db=0)
+        pg_conn = psycopg2.connect(host="localhost", database="benchmark", user="benchmark", password="benchmark")
+        pg_cur = pg_conn.cursor()
+
+        try:
+            if mixed:
+                # Agent loads context before writing its checkpoint
+                query_vec = np.random.rand(EMBEDDING_DIM).astype(np.float32).tolist()
+                coll = COLLECTION_NAMES[np.random.randint(NUM_COLLECTIONS)]
+                read_lats["qdrant"].append(self.qdrant_query_with_retry(qdrant, query_vec, coll, limit=10))
+
+                start = time.time()
+                redis_client.get(f"agent:{agent_id}:task:{task_id % TASKS_PER_AGENT}")
+                read_lats["redis"].append((time.time() - start) * 1000)
+
+                start = time.time()
+                pg_cur.execute("SELECT state FROM checkpoints WHERE agent_id = %s ORDER BY created_at DESC LIMIT 5", (str(agent_id),))
+                pg_cur.fetchall()
+                read_lats["postgres"].append((time.time() - start) * 1000)
+
+            state = self.build_checkpoint_state(agent_id, task_id)
+
+            # 1. Checkpoint commit - INSERT + COMMIT waits on WAL fsync
+            start = time.time()
+            pg_cur.execute("INSERT INTO checkpoints (agent_id, task_id, state) VALUES (%s, %s, %s)",
+                           (str(agent_id), str(task_id), state))
+            pg_conn.commit()
+            pg_ms = (time.time() - start) * 1000
+
+            # 2. Latest-state pointer
+            start = time.time()
+            redis_client.setex(f"agent:{agent_id}:latest", 3600, state)
+            redis_ms = (time.time() - start) * 1000
+
+            # 3. Agent memory write - Qdrant WAL path, round-robin tenant.
+            #    Collection and IDs are deterministic per (agent, task) and IDs sit above
+            #    the preloaded range, so repeat runs overwrite the same points instead of
+            #    growing the dataset run over run.
+            vectors = np.random.rand(UPSERT_BATCH, EMBEDDING_DIM).astype(np.float32)
+            task_index = agent_id * TASKS_PER_AGENT + task_id
+            coll = COLLECTION_NAMES[task_index % NUM_COLLECTIONS]
+            base_id = VECTORS_PER_COLLECTION + task_index * UPSERT_BATCH
+            points = [
+                PointStruct(id=base_id + i, vector=vectors[i].tolist(), payload={"agent": agent_id, "step": task_id})
+                for i in range(UPSERT_BATCH)
+            ]
+            qdrant_ms = self.qdrant_upsert_with_retry(qdrant, coll, points)
+        finally:
+            pg_cur.close()
+            pg_conn.close()
+
+        task_ms = (time.time() - task_start) * 1000
+        return pg_ms, redis_ms, qdrant_ms, read_lats, task_ms
+
+    def _pcts(self, prefix, values):
+        """p50/p95/p99 dict for a latency list; empty dict if no samples"""
+        if not values:
+            return {}
+        return {
+            f"{prefix}_p{p}_ms": round(float(np.percentile(values, p)), 2)
+            for p in (50, 95, 99)
+        }
+
+    def _timeseries_p99(self, samples):
+        """Bucket (t_offset_s, latency_ms) samples into fixed windows and report p99 per window"""
+        buckets = {}
+        for t, ms in samples:
+            buckets.setdefault(int(t // TIMESERIES_WINDOW_S), []).append(ms)
+        return [
+            {"window_start_s": w * TIMESERIES_WINDOW_S, "ops": len(v),
+             "p99_ms": round(float(np.percentile(v, 99)), 2)}
+            for w, v in sorted(buckets.items())
+        ]
+
+    def run_write_benchmark(self, mode="write", skip_preload=False):
+        """State-serialization benchmark: pure checkpoint writes, or mixed context-read + checkpoint-write"""
+        mixed = mode == "mixed"
+
+        # Dataset must exist: mixed-mode reads need it, and upserts should land on filled collections
+        client = QdrantClient(host="localhost", port=6333, timeout=60)
+        existing_vectors = 0
+        try:
+            for name in COLLECTION_NAMES:
+                existing_vectors += client.get_collection(name).points_count
+        except:
+            existing_vectors = 0
+
+        if skip_preload or existing_vectors >= PRELOAD_VECTORS:
+            print(f"Skipping preload - found {existing_vectors:,} existing vectors", file=sys.stderr, flush=True)
+        else:
+            self.setup()
+            self.preload_vectors()
+
+        # Fresh checkpoints table + baseline agent data for mixed-mode reads
+        self.ensure_pg_schema()
+        print(f"Phase 1: Populating agent data for {NUM_AGENTS} agents...", file=sys.stderr, flush=True)
+        with ThreadPoolExecutor(max_workers=10) as executor:
+            list(executor.map(self.populate_data, range(NUM_AGENTS)))
+
+        print(f"Phase 2: Running {mode} benchmark ({NUM_AGENTS} agents x {TASKS_PER_AGENT} tasks)...", file=sys.stderr, flush=True)
+        self.benchmark_start = time.time()
+        total_operations = 0
+
+        with ThreadPoolExecutor(max_workers=10) as executor:
+            futures = []
+            for agent_id in range(NUM_AGENTS):
+                for task_id in range(TASKS_PER_AGENT):
+                    futures.append(executor.submit(self.run_write_task, agent_id, task_id, mixed))
+
+            for future in as_completed(futures):
+                pg_ms, redis_ms, qdrant_ms, read_lats, task_ms = future.result()
+                now = time.time() - self.benchmark_start
+                self.pg_commit_samples.append((now, pg_ms))
+                self.redis_write_samples.append((now, redis_ms))
+                self.qdrant_upsert_samples.append((now, qdrant_ms))
+                self.write_task_samples.append((now, task_ms))
+                self.qdrant_latencies.extend(read_lats["qdrant"])
+                self.redis_latencies.extend(read_lats["redis"])
+                self.postgres_latencies.extend(read_lats["postgres"])
+                total_operations += 3 + sum(len(v) for v in read_lats.values())
+
+        benchmark_duration = time.time() - self.benchmark_start
+
+        pg_lats = [ms for _, ms in self.pg_commit_samples]
+        redis_lats = [ms for _, ms in self.redis_write_samples]
+        upsert_lats = [ms for _, ms in self.qdrant_upsert_samples]
+        task_lats = [ms for _, ms in self.write_task_samples]
+        write_lats = pg_lats + redis_lats + upsert_lats
+
+        result = {
+            "platform": PLATFORM,
+            "mode": mode,
+            "timestamp": datetime.now().isoformat(),
+            "num_agents": NUM_AGENTS,
+            "tasks_per_agent": TASKS_PER_AGENT,
+            "checkpoint_base_kb": CHECKPOINT_BASE_KB,
+            "checkpoint_growth_kb": CHECKPOINT_GROWTH_KB,
+            "checkpoint_max_kb": CHECKPOINT_MAX_KB,
+            "upsert_batch": UPSERT_BATCH,
+            "total_operations": total_operations,
+            "total_tasks": len(task_lats),
+            "benchmark_duration_s": round(benchmark_duration, 2),
+            "iops": round(total_operations / benchmark_duration, 2),
+        }
+        result.update(self._pcts("write_latency", write_lats))
+        result.update(self._pcts("postgres_commit", pg_lats))
+        result.update(self._pcts("redis_write", redis_lats))
+        result.update(self._pcts("qdrant_upsert", upsert_lats))
+        result.update(self._pcts("task_time", task_lats))
+        if mixed:
+            result.update(self._pcts("qdrant_read", self.qdrant_latencies))
+            result.update(self._pcts("redis_read", self.redis_latencies))
+            result.update(self._pcts("postgres_read", self.postgres_latencies))
+        result["timeseries"] = {
+            "window_s": TIMESERIES_WINDOW_S,
+            "postgres_commit_p99": self._timeseries_p99(self.pg_commit_samples),
+            "qdrant_upsert_p99": self._timeseries_p99(self.qdrant_upsert_samples),
+            "task_time_p99": self._timeseries_p99(self.write_task_samples),
+        }
+        return result
+
     def run_benchmark(self, mode="cold", skip_preload=False):
         # Auto-detect if vectors already exist (sum across all collections)
         client = QdrantClient(host="localhost", port=6333, timeout=60)
@@ -327,8 +539,9 @@ class BenchmarkRunner:
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="LangChain benchmark")
-    parser.add_argument("--mode", choices=["cold", "hot"], default="cold",
-                        help="Benchmark mode: cold (drop caches) or hot (cached)")
+    parser.add_argument("--mode", choices=["cold", "hot", "write", "mixed"], default="cold",
+                        help="Benchmark mode: cold (drop caches), hot (cached), "
+                             "write (state-serialization writes), mixed (context reads + checkpoint writes)")
     parser.add_argument("--skip-preload", action="store_true",
                         help="Skip vector preload (use existing data)")
     parser.add_argument("--preload-only", action="store_true",
@@ -353,5 +566,7 @@ if __name__ == "__main__":
             runner.setup()
             runner.preload_vectors()
         print(json.dumps({"status": "preload_complete", "vectors": PRELOAD_VECTORS}))
+    elif args.mode in ("write", "mixed"):
+        print(json.dumps(runner.run_write_benchmark(mode=args.mode, skip_preload=args.skip_preload), indent=2))
     else:
         print(json.dumps(runner.run_benchmark(mode=args.mode, skip_preload=args.skip_preload), indent=2))

@@ -3,6 +3,8 @@ version: '3.8'
 services:
   postgres:
     image: postgres:15
+    # Pin the durability contract: every COMMIT waits on WAL fsync
+    command: postgres -c synchronous_commit=on
     environment:
       POSTGRES_USER: benchmark
       POSTGRES_PASSWORD: benchmark
@@ -24,6 +26,8 @@ services:
 
   redis:
     image: redis:7
+    # AOF on so Redis writes touch the disk; fsync policy is the experiment knob
+    command: redis-server --appendonly yes --appendfsync {{ redis_appendfsync }}
     ports:
       - "6379:6379"
     volumes:
