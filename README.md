@@ -2,7 +2,7 @@
 
 Write-path follow-up to the multi-tenant cold-read suite (`multi-tenant-summary` branch). Agent runtimes (LangGraph-style) serialize and commit a checkpoint after every step — small synchronous writes that must fsync before the agent proceeds. This branch benchmarks that write path on the same five storage platforms.
 
-> The read suite showed Nirvana ABS fastest end-to-end in all 9 runs, with a per-query p99 tail that widens under sustained load while io2 stays flat. The open question this branch answers: does that tail behavior also appear on the write path, and does dynamic IOPS scaling hold predictable latency bounds under sustained write pressure?
+> Checkpoint writes only: each task commits agent state to Postgres (WAL fsync), updates a Redis pointer, and upserts vectors into Qdrant. Tail behavior over time is captured as per-10s-window p99 in every result JSON.
 
 ## Platforms
 
@@ -117,7 +117,7 @@ AWS floors are pinned by provisioned IOPS and reproduce to within ±0.1% across 
 | io2-64k | 40,321–40,342 | 0.99–1.08 ms |
 | nirvana-abs | 35,079–104,083 | 1.13–1.91 ms |
 
-Two signals: writes are a far closer contest than reads (Nirvana's read floor was 261–313k IOPS), and **io2 beats Nirvana on raw fsync latency** (~1.0 vs ~1.1–1.9 ms) while gp3's ~2.7 ms fsync handicaps it at any provisioned IOPS.
+For reference against the read suite: Nirvana's read floor was 261–313k IOPS. io2 measures the lowest fsync latency (~1.0 ms) of the five platforms; gp3 measures ~2.7 ms at both provisioned levels.
 
 ## Scenario 1 — 100×10 (1,000 checkpoints)
 
@@ -131,7 +131,11 @@ Two signals: writes are a far closer contest than reads (Nirvana's read floor wa
 
 (cells: duration / task p99)
 
-Nirvana fastest duration in all 6 runs. At this 1,000-task sample, task p99 is noisy — Nirvana wins it in 4 of 6 runs, loses r2 write and r3 mixed. gp3-3k is indistinguishable from the io2 tier: 1,000 checkpoints never saturate a 3k IOPS ceiling.
+### Takeaways
+
+- Nirvana fastest duration in all 6 runs (35–38s vs 39–44s).
+- Task p99 is noisy at the 1,000-task sample: Nirvana lowest in 4 of 6 runs (r2 write and r3 mixed go to io2-32k).
+- gp3-3k matches the io2 tier here — 1,000 checkpoints don't saturate a 3k IOPS ceiling.
 
 ## Scenario 2 — 500×20 (10,000 checkpoints)
 
@@ -143,9 +147,13 @@ Nirvana fastest duration in all 6 runs. At this 1,000-task sample, task p99 is n
 | gp3-3k | 606s / 1,319ms | 403s / 583ms | 401s / 588ms | 427s / 602ms | 431s / 604ms | 432s / 608ms |
 | io2-64k | 444s / 1,005ms | 418s / 608ms | 415s / 608ms | 445s / 623ms | 440s / 616ms | 444s / 625ms |
 
-\* write r1 = first-insert regime. gp3-3k collapses there (606s, 1.3s task p99, 649ms Qdrant upsert p99 — the index-growth I/O saturates its 3k IOPS ceiling); in steady-state overwrites it performs like gp3-16k.
+\* write r1 = first-insert regime (see Results intro).
 
-Nirvana wins duration and task p99 in all 6 runs (9–14% duration margin vs best AWS). Per-op Postgres commit p99 goes the other way at this scale: io2-32k/gp3-16k hold 78–88ms vs Nirvana's 95–105ms — same "io2 owns the per-op tail at moderate load" pattern as the read suite.
+### Takeaways
+
+- Nirvana lowest duration and task p99 in all 6 runs (duration 9–14% below best AWS).
+- io2-32k/gp3-16k hold the lowest Postgres commit p99 at this scale (78–88ms vs Nirvana 95–105ms) — the write-path analog of the read suite, where io2 held the per-query Qdrant tail.
+- First-insert r1: gp3-3k runs 606s / 1.3s task p99 vs 401–403s / ~585ms in steady-state overwrites; io2-64k shows the same effect at smaller magnitude (444s vs 415–418s).
 
 ## Scenario 3 — 1000×100 sustained (100,000 checkpoints)
 
@@ -157,21 +165,25 @@ Nirvana wins duration and task p99 in all 6 runs (9–14% duration margin vs bes
 | io2-64k | 5,742s / 1,382ms | 6,619s / 1,432ms | 6,672s / 1,449ms | 7,155s / 1,559ms | 7,257s / 1,562ms | 7,223s / 1,557ms |
 | gp3-3k | 5,302s / 1,348ms | 5,999s / 1,375ms | 6,093s / 1,392ms | 8,812s / 2,614ms | 8,628s / 2,690ms | 8,806s / 2,642ms |
 
-\* write r1 = first-insert regime. Note the AWS platforms all get ~13% *slower* in steady-state overwrites (segment rewrite amplification) while Nirvana absorbs the same shift with +6%.
+\* write r1 = first-insert regime (see Results intro).
 
-At sustained scale the moderate-load pattern flips — Nirvana wins everything:
+Per-backend p99, steady-state runs (r2/r3):
 
-| Backend p99 (steady state, r2/r3) | gp3-3k | gp3-16k | io2-32k | io2-64k | nirvana-abs |
-|-----------------------------------|-------:|--------:|--------:|--------:|------------:|
+| Backend p99 | gp3-3k | gp3-16k | io2-32k | io2-64k | nirvana-abs |
+|-------------|-------:|--------:|--------:|--------:|------------:|
 | Postgres commit (write mode) | 217–219ms | 212ms | 210–213ms | 224–232ms | **105–107ms** |
 | Qdrant upsert (write mode) | 667–699ms | 374–386ms | 371–381ms | 395–398ms | **254–282ms** |
 | Postgres commit (mixed mode) | 166–175ms | 165ms | 158–163ms | 170–171ms | **79–82ms** |
 
-Duration margin vs best AWS: 24–28% (write), 25–27% (mixed). Task p99 margin: 33% (write), 34% (mixed). gp3-3k is the only platform where mixed is *slower* than pure-write — the added read IOPS push it over its ceiling (8,600–8,800s, 2.6s task p99).
+### Takeaways
+
+- Nirvana lowest duration (24–28% below best AWS in write mode, 25–27% mixed), task p99 (33–34% lower), and every backend p99 at this scale.
+- Steady-state overwrites run ~13% slower than first-insert r1 on all four AWS platforms; +6% on Nirvana.
+- gp3-3k is the only platform where mixed mode is slower than pure write (8,600–8,800s, 2.6s task p99) — the added read IOPS exceed its 3k ceiling.
 
 ## Tail stability under sustained load
 
-The prospect question this suite exists to answer: does dynamic IOPS hold predictable latency bounds under sustained write pressure? Per-10s-window Postgres commit p99 across the 100K-checkpoint runs:
+Per-10s-window Postgres commit p99 across the 100K-checkpoint runs (computed from the `timeseries` block in each result JSON):
 
 | Platform | Median window p99 | Worst window p99 | Worst/median |
 |----------|------------------:|-----------------:|-------------:|
@@ -182,28 +194,26 @@ The prospect question this suite exists to answer: does dynamic IOPS hold predic
 | gp3-16k | 140–181ms | 611–715ms | 3.4–5.1× |
 | gp3-3k | 142–193ms | 566–664ms | 3.0–4.5× |
 
-Read this carefully — it cuts both ways:
+### Takeaways
 
-- **In relative terms, EBS is flatter.** Worst-window/median ratio is 3–5× on every AWS platform vs 4.4–9.7× on Nirvana. If your SLO is expressed as "p99 never exceeds N× typical," EBS is easier to reason about.
-- **In absolute terms, Nirvana's bounds are as good or better.** In steady state its *worst* 10-second window (429–536ms) is lower than every AWS platform's worst (566–744ms), while its *typical* window is roughly half theirs. The high ratio is an artifact of the low baseline, not of taller spikes.
-- The genuinely wide Nirvana tail (735–964ms worst windows) appears only in the first-insert regime — the same shared-controller queue behavior seen in the read suite's 100K-task run, triggered by index-growth I/O bursts.
+- Worst-window/median ratio: 3.0–5.1× on the AWS platforms, 4.4–7.4× on Nirvana in steady state, 9.2–9.7× on Nirvana in the first-insert runs.
+- Absolute values, steady state: Nirvana median window 73–97ms and worst window 429–536ms; AWS medians 133–193ms and worst windows 566–744ms.
+- Nirvana's 735–964ms worst windows occur only in the first-insert regime.
 
-## Overall takeaways
+## Cross-scenario summary
 
-1. **Nirvana ABS wins end-to-end duration in all 18 runs** (9 write, 9 mixed), with the margin growing from ~10% at moderate load to ~25–35% at sustained 100K-checkpoint load.
-2. **The moderate-load pattern mirrors the read suite**: io2/gp3-16k hold the best per-op commit tail at 10K checkpoints (io2's ~1.0ms fsync floor showing through), while Nirvana wins throughput.
-3. **At sustained scale everything flips to Nirvana** — half the Postgres commit p99, lowest Qdrant upsert p99, lowest absolute worst-window latency. AWS's fixed IOPS ceilings become the constraint; dynamic IOPS absorbs the load.
-4. **First-insert vs overwrite matters more than platform choice for some workloads**: index-growth write bursts are 1.5× the steady-state cost on constrained platforms (gp3-3k: 606s vs 402s at 500×20). Capacity-plan for ingest, not steady state.
-5. **gp3-3k is fine until it isn't**: indistinguishable from io2 at 1K checkpoints, survivable at 10K steady-state, and 1.7× worse than everything at sustained mixed load.
-6. io2-64k again buys nothing over io2-32k (instance-capped at 40k IOPS) — and was marginally slower in most write runs.
+- Nirvana lowest end-to-end duration in all 18 runs (9 write, 9 mixed): ~10% below best AWS at 10K checkpoints, 24–28% at 100K.
+- io2-32k/gp3-16k lowest Postgres commit p99 at 10K checkpoints; Nirvana lowest at 100K (105–107ms vs 210–232ms).
+- First-insert runs cost 1.5× steady state on gp3-3k (606s vs 402s at 500×20), ~13% extra on the other AWS platforms at 100K.
+- io2-64k and io2-32k are statistically indistinguishable (instance cap is 40k IOPS); io2-64k measured marginally slower in most write runs.
 
-## Caveats and incident log
+## Run notes
 
-- **r1 of 500×20 / 1000×100 is a different (first-insert) regime** than r2/r3 (overwrite) — see Results intro. Both are legitimate workloads; compare like with like.
-- **Mixed-mode reads are warm/steady-state reads** (no cache drop between the write and mixed phases), unlike the cold-read suite.
-- **1000×100 r2 protocol deviations**: the Ansible controller (a laptop) slept mid-run, stretching the gap between the write and mixed phases to ~18h on the AWS hosts (benchmarks themselves ran uninterrupted on the VMs — durations are VM-side and unaffected). Nirvana's r2 mixed leg is a standalone re-run (see below); its r1/r3 runs are protocol-clean and agree with it.
-- **Security incident (2026-07-05)**: the original Terraform exposed Redis/Postgres/Qdrant to 0.0.0.0/0. Internet scan bots wrote foreign keys into Redis on four hosts and flipped Nirvana's Redis to read-only replica mode mid-run (crashing one mixed leg, which was re-run). Remediation: all service ports now bind to 127.0.0.1 (committed), tainted Redis/Postgres volumes recreated, Qdrant dataset verified intact (5.5M vectors exactly). Published numbers are unaffected — the crashed run produced no data. Follow-up: tighten SG/firewall ingress in Terraform.
-- Nirvana's fio write floor varies 35k–104k IOPS run to run (no provisioned cap); its application-level results are nonetheless the most stable of any platform (≤2% duration spread in steady state).
+- r1 of 500×20 / 1000×100 is the first-insert regime; r2/r3 are steady-state overwrites (see Results intro).
+- Mixed-mode reads run against warm caches (no cache drop between the write and mixed phases), unlike the cold-read suite.
+- 1000×100 r2: the benchmark controller was suspended mid-run, stretching the gap between the write and mixed phases to ~18h on the AWS hosts. Benchmarks execute on the VMs and were uninterrupted; durations are VM-side. Nirvana's r2 mixed leg is a standalone re-run; its r1/r3 legs are protocol-clean and agree with it.
+- 2026-07-05: the original Terraform exposed Redis/Postgres/Qdrant to 0.0.0.0/0 and Redis was tampered with by internet scan bots mid-suite (one mixed leg crashed and was re-run; no published run was affected). All service ports now bind to 127.0.0.1. Redis/Postgres volumes were recreated; the Qdrant dataset was verified intact (5,500,000 vectors).
+- Nirvana's fio write floor varies 35k–104k IOPS run to run (no provisioned cap). Its application-level duration spread is ≤2% in steady state.
 
 ## Links
 
