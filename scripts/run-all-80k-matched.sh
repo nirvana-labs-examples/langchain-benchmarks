@@ -6,8 +6,15 @@
 set -e
 cd "$(dirname "$0")/.."
 
-AWS_IP=$(terraform -chdir=terraform/80k-matched/aws output -raw gp3_80k_sv_ip 2>/dev/null || true)
-NIRVANA_IP=$(terraform -chdir=terraform/80k-matched/nirvana output -raw nirvana_32_ip 2>/dev/null || true)
+tf_ip() {
+  local ip
+  ip=$(terraform -chdir="$1" output -raw "$2" 2>/dev/null) || return 0
+  # keep only a well-formed IPv4 — terraform emits diagnostics on stdout in
+  # some error paths, which must not leak into the inventory
+  [[ $ip =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}$ ]] && echo "$ip"
+}
+AWS_IP=$(tf_ip terraform/80k-matched/aws gp3_80k_sv_ip)
+NIRVANA_IP=$(tf_ip terraform/80k-matched/nirvana nirvana_32_ip)
 [ -n "$AWS_IP" ] || [ -n "$NIRVANA_IP" ] || { echo "no terraform outputs found — apply a stack first"; exit 1; }
 
 PLATFORMS=()
