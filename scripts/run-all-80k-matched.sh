@@ -12,6 +12,7 @@ tf_ip() {
   # keep only a well-formed IPv4 — terraform emits diagnostics on stdout in
   # some error paths, which must not leak into the inventory
   [[ $ip =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}$ ]] && echo "$ip"
+  return 0
 }
 AWS_IP=$(tf_ip terraform/80k-matched/aws gp3_80k_sv_ip)
 NIRVANA_IP=$(tf_ip terraform/80k-matched/nirvana nirvana_32_ip)
