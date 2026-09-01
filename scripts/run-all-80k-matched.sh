@@ -1,33 +1,40 @@
 #!/bin/bash
 # 80k matched-pair grid: gp3-80k-sv (AWS) and nirvana-abs-32 side by side.
-# Generates the inventory from terraform output, waits for both hosts,
-# then runs all 3 scenarios x 3 runs. Ansible runs both hosts in parallel.
+# Each side is its own terraform stack (terraform/80k-matched/{aws,nirvana})
+# so they can be provisioned and benchmarked independently — any side whose
+# stack has no output is simply skipped. Ansible runs present hosts in parallel.
 set -e
 cd "$(dirname "$0")/.."
-TF=terraform/80k-matched
 
-AWS_IP=$(terraform -chdir=$TF output -raw gp3_80k_sv_ip)
-NIRVANA_IP=$(terraform -chdir=$TF output -raw nirvana_32_ip)
-[ -n "$AWS_IP" ] && [ -n "$NIRVANA_IP" ] || { echo "missing terraform outputs"; exit 1; }
+AWS_IP=$(terraform -chdir=terraform/80k-matched/aws output -raw gp3_80k_sv_ip 2>/dev/null || true)
+NIRVANA_IP=$(terraform -chdir=terraform/80k-matched/nirvana output -raw nirvana_32_ip 2>/dev/null || true)
+[ -n "$AWS_IP" ] || [ -n "$NIRVANA_IP" ] || { echo "no terraform outputs found — apply a stack first"; exit 1; }
 
+PLATFORMS=()
 mkdir -p ansible/inventory ansible/logs ansible/results
-cat > ansible/inventory/hosts-80k-matched.yml << EOF
-all:
-  children:
-    aws:
-      hosts:
-        gp3-80k-sv:
-          ansible_host: ${AWS_IP}
-          ansible_user: ubuntu
-          platform_name: gp3-80k-sv
-    nirvana:
-      hosts:
-        nirvana-abs-32:
-          ansible_host: ${NIRVANA_IP}
-          ansible_user: ubuntu
-          platform_name: nirvana-abs-32
-EOF
-echo "inventory: gp3-80k-sv=${AWS_IP} nirvana-abs-32=${NIRVANA_IP}"
+{
+  echo "all:"
+  echo "  children:"
+  if [ -n "$AWS_IP" ]; then
+    echo "    aws:"
+    echo "      hosts:"
+    echo "        gp3-80k-sv:"
+    echo "          ansible_host: ${AWS_IP}"
+    echo "          ansible_user: ubuntu"
+    echo "          platform_name: gp3-80k-sv"
+  fi
+  if [ -n "$NIRVANA_IP" ]; then
+    echo "    nirvana:"
+    echo "      hosts:"
+    echo "        nirvana-abs-32:"
+    echo "          ansible_host: ${NIRVANA_IP}"
+    echo "          ansible_user: ubuntu"
+    echo "          platform_name: nirvana-abs-32"
+  fi
+} > ansible/inventory/hosts-80k-matched.yml
+[ -n "$AWS_IP" ] && PLATFORMS+=(gp3-80k-sv)
+[ -n "$NIRVANA_IP" ] && PLATFORMS+=(nirvana-abs-32)
+echo "inventory: aws=${AWS_IP:-skipped} nirvana=${NIRVANA_IP:-skipped}"
 
 wait_ssh() {
   for i in $(seq 1 40); do
@@ -36,12 +43,9 @@ wait_ssh() {
   done
   echo "SSH/readiness FAILED for $1"; return 1
 }
-wait_ssh "$AWS_IP" "test -f /opt/.disk-ready" &
-p1=$!
-wait_ssh "$NIRVANA_IP" "exit" &
-p2=$!
-wait $p1 && wait $p2
-echo "both hosts ready"
+[ -n "$AWS_IP" ] && { wait_ssh "$AWS_IP" "test -f /opt/.disk-ready" || exit 1; }
+[ -n "$NIRVANA_IP" ] && { wait_ssh "$NIRVANA_IP" "exit" || exit 1; }
+echo "hosts ready"
 
 cd ansible
 run() {
@@ -51,7 +55,7 @@ run() {
     -e num_agents=$agents -e tasks_per_agent=$tasks \
     > logs/run-80km-$dir-$r.log 2>&1
   mkdir -p results/$dir
-  for p in gp3-80k-sv nirvana-abs-32; do
+  for p in "${PLATFORMS[@]}"; do
     mv results/$p-benchmark.json results/$dir/$p-benchmark-$r.json
     mv results/$p-iostat.log results/$dir/$p-iostat-$r.log
   done
