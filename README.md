@@ -217,6 +217,38 @@ ansible/results/
     └── ... (same layout; r3 is 1000×100, see Scenario 3)
 ```
 
+## 80k matched pair — gp3 at its per-volume maximum
+
+In September 2025 AWS raised gp3's per-volume limits to 80,000 IOPS / 2,000 MiB/s / 64 TiB (previously 16,000 / 1,000 / 16 TiB), so gp3 now reaches 80k on a **single volume**. No m6i below 16xlarge can realize it (instance EBS cap), so this experiment uses a separate matched pair, sized so the **volume — not the instance — is the bottleneck** and both sides have identical CPU/RAM:
+
+| Platform | Instance | vCPU / RAM | Storage | Instance EBS cap |
+|----------|----------|-----------|---------|------------------|
+| gp3-80k-sv | AWS c6in.8xlarge | 32 / 64 GB | single gp3, 256 GiB @ 80,000 IOPS / 2,000 MiB/s | 100k sustained |
+| nirvana-abs-32 | Nirvana n1-highcpu-32 | 32 / 64 GB | ABS, 256 GB | n/a |
+
+Same workload, scenarios, and cold-read methodology as the main grid. Stack: `terraform/80k-matched/`; driver: `scripts/run-all-80k-matched.sh`. Results are **not directly comparable to the 4 vCPU / 16 GB main grid** (8× CPU, 4× RAM — page cache holds more of the dataset on sustained runs); compare within the pair.
+
+> Numbers vs the RAID-0 experiment it supersedes: a single 80k volume measured a slightly better fio floor (82.7k @ 3.09 ms vs 80.4k @ 3.18 ms for 5 × 16k RAID-0 on m6i.16xlarge) and a markedly tighter Qdrant tail.
+
+### gp3-80k-sv results (fio floor: 82,656–82,723 IOPS / ~3.1 ms, all 9 runs)
+
+| Scenario | r1 dur / task p99 / Qdrant p99 | r2 | r3 |
+|----------|-------------------------------|----|----|
+| 100×10 | 41.5s / 571 ms / 122 ms | 42.4s / 558 ms / 117 ms | 44.1s / 569 ms / 122 ms |
+| 500×20 | 407s / 523 ms / 95 ms | 413s / 549 ms / 94 ms | 407s / 553 ms / 96 ms |
+| 1000×10 | 446s / 586 ms / 98 ms | 408s / 540 ms / 96 ms | — |
+| 1000×100 | — | — | 4,263s / 724 ms / 56 ms |
+
+### nirvana-abs-32 results
+
+Pending — the Nirvana side of the pair has not been run yet.
+
+### Notes
+
+- Qdrant per-query p99 (117–122 ms cold-ish, 94–98 ms at depth, 56 ms at 100K sustained tasks) is the lowest measured on any AWS configuration in this repo, and clearly below the superseded RAID-0 build (128–165 ms) — one 80k volume has a tighter latency path than five striped 16k volumes.
+- End-to-end durations do not improve over the main grid's io2 nodes despite 5× their vCPUs (e.g. 4,263s at 1000×100 vs io2's 4,129–4,151s) — at 10 concurrent workers the LangChain loop, not storage, bounds throughput once the disk stops being the constraint.
+- The 56 ms Qdrant p99 at 1000×100 reflects 64 GB of page cache warming over a 71-minute run as well as the volume itself; the matched Nirvana node will see the same effect, which is the point of the pair.
+
 ## Links
 
 - [Nirvana Labs](https://nirvanalabs.io)
