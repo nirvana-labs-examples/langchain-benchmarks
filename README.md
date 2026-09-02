@@ -224,28 +224,37 @@ In September 2025 AWS raised gp3's per-volume limits to 80,000 IOPS / 2,000 MiB/
 | Platform | Instance | vCPU / RAM | Storage | Instance EBS cap |
 |----------|----------|-----------|---------|------------------|
 | gp3-80k-sv | AWS c6in.8xlarge | 32 / 64 GB | single gp3, 256 GiB @ 80,000 IOPS / 2,000 MiB/s | 100k sustained |
-| nirvana-abs-32 | Nirvana n1-highcpu-32 | 32 / 64 GB | ABS, 256 GB | n/a |
+| nirvana-abs-32 | Nirvana n1-highcpu-32 | 32 / 64 GB | ABS, 256 GB (boot volume) | n/a |
 
 Same workload, scenarios, and cold-read methodology as the main grid. Stack: `terraform/80k-matched/`; driver: `scripts/run-all-80k-matched.sh`. Results are **not directly comparable to the 4 vCPU / 16 GB main grid** (8× CPU, 4× RAM — page cache holds more of the dataset on sustained runs); compare within the pair.
 
 > Numbers vs the RAID-0 experiment it supersedes: a single 80k volume measured a slightly better fio floor (82.7k @ 3.09 ms vs 80.4k @ 3.18 ms for 5 × 16k RAID-0 on m6i.16xlarge) and a markedly tighter Qdrant tail.
 
-### gp3-80k-sv results (fio floor: 82,656–82,723 IOPS / ~3.1 ms, all 9 runs)
+### Raw disk floor (fio, cold)
 
-| Scenario | r1 dur / task p99 / Qdrant p99 | r2 | r3 |
-|----------|-------------------------------|----|----|
-| 100×10 | 41.5s / 571 ms / 122 ms | 42.4s / 558 ms / 117 ms | 44.1s / 569 ms / 122 ms |
-| 500×20 | 407s / 523 ms / 95 ms | 413s / 549 ms / 94 ms | 407s / 553 ms / 96 ms |
-| 1000×10 | 446s / 586 ms / 98 ms | 408s / 540 ms / 96 ms | — |
-| 1000×100 | — | — | 4,263s / 724 ms / 56 ms |
+| Platform | Measured IOPS (across 9 runs) | Mean latency |
+|----------|------------------------------:|-------------:|
+| gp3-80k-sv | 82,656–82,723 | ~3.1 ms |
+| nirvana-abs-32 | 310k–394k | 0.65 ms |
 
-### nirvana-abs-32 results
+### Pair results — dur / task p99 / Qdrant p99
 
-Pending — the Nirvana side of the pair has not been run yet. When it lands, its rows join the table above so the pair reads side by side, scenario by scenario.
+| Scenario | run | gp3-80k-sv | nirvana-abs-32 |
+|----------|-----|------------|----------------|
+| 100×10 | r1 | 41.5s / 571 ms / 122 ms | 47.0s / 775 ms / 273 ms |
+| 100×10 | r2 | 42.4s / 558 ms / 117 ms | 47.8s / 780 ms / 227 ms |
+| 100×10 | r3 | 44.1s / 569 ms / 122 ms | 47.2s / 762 ms / 192 ms |
+| 500×20 | r1 | 407s / 523 ms / 95 ms | 488s / 804 ms / 137 ms |
+| 500×20 | r2 | 413s / 549 ms / 94 ms | 399s / 670 ms / 157 ms |
+| 500×20 | r3 | 407s / 553 ms / 96 ms | 486s / 818 ms / 131 ms |
+| 1000×10 | r1 | 446s / 586 ms / 98 ms | 488s / 801 ms / 134 ms |
+| 1000×10 | r2 | 408s / 540 ms / 96 ms | 485s / 819 ms / 136 ms |
+| 1000×100 | r3 | 4,263s / 724 ms / 56 ms | 4,976s / 938 ms / 89 ms |
 
 ### Key takeaways
 
-- **AWS vs Nirvana at 80k:** pending the nirvana-abs-32 run — this bullet will carry the head-to-head verdict (duration, task p99, Qdrant p99 per scenario) once both sides of the pair have data.
+- **AWS vs Nirvana at 80k: gp3-80k-sv wins every application-level metric in all 9 runs** — end-to-end duration 9–17% faster (except the one run where ABS matched it), task p99 22–32% lower, Qdrant per-query p99 roughly 30–55% lower — despite ABS measuring 3.7–4.8× the raw fio IOPS at one-fifth the latency. At this workload's queue depth, raw IOPS headroom doesn't convert into application latency; the gp3 volume's provisioned-performance consistency does.
+- ABS shows real run-to-run variance on this instance shape (399–488s at 500×20; Qdrant p99 settling 273 → 192 ms across 100×10 runs) where gp3 held ±1–5% spreads on every metric.
 - **A single 80k gp3 volume posts the lowest Qdrant per-query p99 of any AWS configuration in this repo** (117–122 ms at 100×10, 94–98 ms at depth, 56 ms at 100K sustained tasks) — below io2's 140–166 ms in the main grid and clearly below the superseded 5 × 16k RAID-0 build (128–165 ms). One volume has a tighter latency path than five striped ones.
 - End-to-end durations do not improve over the main grid's io2 nodes despite 8× their vCPUs (4,263s at 1000×100 vs io2's 4,129–4,151s) — at 10 concurrent workers the LangChain loop, not storage, bounds throughput once the disk stops being the constraint.
 - The 56 ms Qdrant p99 at 1000×100 reflects 64 GB of page cache warming over a 71-minute run as well as the volume itself; the matched Nirvana node gets the identical advantage, which is the point of the pair.
