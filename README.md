@@ -237,23 +237,42 @@ Same workload, scenarios, and cold-read methodology as the main grid. Stack: `te
 | gp3-80k-sv | 82,656–82,723 | ~3.1 ms |
 | nirvana-abs-32 | 310k–394k | 0.65 ms |
 
-### Pair results — dur / task p99 / Qdrant p99
+### Scenario detail — 500 agents × 20 tasks (10,000 tasks)
 
-| Scenario | run | gp3-80k-sv | nirvana-abs-32 |
-|----------|-----|------------|----------------|
-| 100×10 | r1 | 41.5s / 571 ms / 122 ms | 47.0s / 775 ms / 273 ms |
-| 100×10 | r2 | 42.4s / 558 ms / 117 ms | 47.8s / 780 ms / 227 ms |
-| 100×10 | r3 | 44.1s / 569 ms / 122 ms | 47.2s / 762 ms / 192 ms |
-| 500×20 | r1 | 407s / 523 ms / 95 ms | 488s / 804 ms / 137 ms |
-| 500×20 | r2 | 413s / 549 ms / 94 ms | 399s / 670 ms / 157 ms |
-| 500×20 | r3 | 407s / 553 ms / 96 ms | 486s / 818 ms / 131 ms |
-| 1000×10 | r1 | 446s / 586 ms / 98 ms | 488s / 801 ms / 134 ms |
-| 1000×10 | r2 | 408s / 540 ms / 96 ms | 485s / 819 ms / 136 ms |
-| 1000×100 | r3 | 4,263s / 724 ms / 56 ms | 4,976s / 938 ms / 89 ms |
+#### LangChain cold reads
+
+| Platform | r1 dur | r1 task p99 | r2 dur | r2 task p99 | r3 dur | r3 task p99 |
+|----------|-------:|------------:|-------:|------------:|-------:|------------:|
+| **gp3-80k-sv** | **407s** | **523 ms** | **413s** | **549 ms** | **407s** | **553 ms** |
+| nirvana-abs-32 | 488s | 804 ms | 399s | 670 ms | 486s | 818 ms |
+
+#### App read p99 — Qdrant / Redis / Postgres
+
+| Platform | r1 | r2 | r3 |
+|----------|----|----|----|
+| **gp3-80k-sv** | **95 / 24 / 6 ms** | **94 / 21 / 6 ms** | **96 / 27 / 7 ms** |
+| nirvana-abs-32 | 137 / 55 / 14 ms | 157 / 85 / 20 ms | 131 / 58 / 16 ms |
+
+Full per-run JSON and iostat logs for every scenario are in `ansible/results/{100X10,500X20,1000X10}/{gp3-80k-sv,nirvana-abs-32}-*`.
+
+### Cross-scenario summary — Qdrant p99 / task p99 / duration
+
+| Scenario | gp3-80k-sv | nirvana-abs-32 |
+|----------|------------|----------------|
+| 100×10 r1 | 122 / 571 / 42s | 273 / 775 / 47s |
+| 100×10 r2 | 117 / 558 / 42s | 227 / 780 / 48s |
+| 100×10 r3 | 122 / 569 / 44s | 192 / 762 / 47s |
+| 500×20 r1 | 95 / 523 / 407s | 137 / 804 / 488s |
+| 500×20 r2 | 94 / 549 / 413s | 157 / 670 / 399s |
+| 500×20 r3 | 96 / 553 / 407s | 131 / 818 / 486s |
+| 1000×10 r1 | 98 / 586 / 446s | 134 / 801 / 488s |
+| 1000×10 r2 | 96 / 540 / 408s | 136 / 819 / 485s |
+| 1000×100 r3 | 56 / 724 / 4,263s | 89 / 938 / 4,976s |
 
 ### Key takeaways
 
 - **AWS vs Nirvana at 80k: gp3-80k-sv wins every application-level metric in all 9 runs** — end-to-end duration 9–17% faster (except the one run where ABS matched it), task p99 22–32% lower, Qdrant per-query p99 roughly 30–55% lower — despite ABS measuring 3.7–4.8× the raw fio IOPS at one-fifth the latency. At this workload's queue depth, raw IOPS headroom doesn't convert into application latency; the gp3 volume's provisioned-performance consistency does.
+- The gap is not only Qdrant: **all three services read faster on gp3** — Redis p99 14–28 ms vs ABS 46–85 ms, Postgres p99 4–7 ms vs 13–27 ms — pointing at the whole I/O path under load, not one access pattern.
 - ABS shows real run-to-run variance on this instance shape (399–488s at 500×20; Qdrant p99 settling 273 → 192 ms across 100×10 runs) where gp3 held ±1–5% spreads on every metric.
 - **A single 80k gp3 volume posts the lowest Qdrant per-query p99 of any AWS configuration in this repo** (117–122 ms at 100×10, 94–98 ms at depth, 56 ms at 100K sustained tasks) — below io2's 140–166 ms in the main grid and clearly below the superseded 5 × 16k RAID-0 build (128–165 ms). One volume has a tighter latency path than five striped ones.
 - End-to-end durations do not improve over the main grid's io2 nodes despite 8× their vCPUs (4,263s at 1000×100 vs io2's 4,129–4,151s) — at 10 concurrent workers the LangChain loop, not storage, bounds throughput once the disk stops being the constraint.
