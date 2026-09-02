@@ -16,6 +16,12 @@ tf_ip() {
 }
 AWS_IP=$(tf_ip terraform/80k-matched/aws gp3_80k_sv_ip)
 NIRVANA_IP=$(tf_ip terraform/80k-matched/nirvana nirvana_32_ip)
+# ONLY=aws / ONLY=nirvana restricts the run to one side (e.g. when the other
+# side's results are already committed and must not be overwritten)
+case "${ONLY:-}" in
+  aws)     NIRVANA_IP="" ;;
+  nirvana) AWS_IP="" ;;
+esac
 [ -n "$AWS_IP" ] || [ -n "$NIRVANA_IP" ] || { echo "no terraform outputs found — apply a stack first"; exit 1; }
 
 PLATFORMS=()
