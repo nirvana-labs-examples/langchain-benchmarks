@@ -241,13 +241,14 @@ Same workload, scenarios, and cold-read methodology as the main grid. Stack: `te
 
 ### nirvana-abs-32 results
 
-Pending — the Nirvana side of the pair has not been run yet.
+Pending — the Nirvana side of the pair has not been run yet. When it lands, its rows join the table above so the pair reads side by side, scenario by scenario.
 
-### Notes
+### Key takeaways
 
-- Qdrant per-query p99 (117–122 ms cold-ish, 94–98 ms at depth, 56 ms at 100K sustained tasks) is the lowest measured on any AWS configuration in this repo, and clearly below the superseded RAID-0 build (128–165 ms) — one 80k volume has a tighter latency path than five striped 16k volumes.
-- End-to-end durations do not improve over the main grid's io2 nodes despite 5× their vCPUs (e.g. 4,263s at 1000×100 vs io2's 4,129–4,151s) — at 10 concurrent workers the LangChain loop, not storage, bounds throughput once the disk stops being the constraint.
-- The 56 ms Qdrant p99 at 1000×100 reflects 64 GB of page cache warming over a 71-minute run as well as the volume itself; the matched Nirvana node will see the same effect, which is the point of the pair.
+- **AWS vs Nirvana at 80k:** pending the nirvana-abs-32 run — this bullet will carry the head-to-head verdict (duration, task p99, Qdrant p99 per scenario) once both sides of the pair have data.
+- **A single 80k gp3 volume posts the lowest Qdrant per-query p99 of any AWS configuration in this repo** (117–122 ms at 100×10, 94–98 ms at depth, 56 ms at 100K sustained tasks) — below io2's 140–166 ms in the main grid and clearly below the superseded 5 × 16k RAID-0 build (128–165 ms). One volume has a tighter latency path than five striped ones.
+- End-to-end durations do not improve over the main grid's io2 nodes despite 8× their vCPUs (4,263s at 1000×100 vs io2's 4,129–4,151s) — at 10 concurrent workers the LangChain loop, not storage, bounds throughput once the disk stops being the constraint.
+- The 56 ms Qdrant p99 at 1000×100 reflects 64 GB of page cache warming over a 71-minute run as well as the volume itself; the matched Nirvana node gets the identical advantage, which is the point of the pair.
 
 ## Links
 
