@@ -27,3 +27,5 @@ Thumbs.db
 .vscode/
 *.swp
 *.swo
+ansible/inventory/
+ansible/logs/
